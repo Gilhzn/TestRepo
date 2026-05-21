@@ -284,6 +284,137 @@ mod tests {
         assert_eq!(lines, vec!["first line", "second"]);
     }
 
+    /// Deterministic mini-PRNG so equivalence tests are reproducible without
+    /// pulling in a proptest dependency. Same seed → same sequence.
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 ^ (self.0 >> 33)
+        }
+        fn range(&mut self, n: u64) -> u64 {
+            if n == 0 { 0 } else { self.next_u64() % n }
+        }
+    }
+
+    fn apply_random_edits(doc: &CrdtDoc, rng: &mut Rng, n_ops: usize) {
+        for _ in 0..n_ops {
+            let current = doc.snapshot();
+            let len = current.chars().count() as u32;
+            let op = rng.range(3);
+            if op < 2 || len == 0 {
+                // Insert
+                let pos = rng.range((len + 1) as u64) as u32;
+                let payload_kind = rng.range(4);
+                let payload: String = match payload_kind {
+                    0 => "x".into(),
+                    1 => "hello".into(),
+                    2 => "\n".into(),
+                    _ => format!("[{}]", rng.range(10)),
+                };
+                doc.insert(pos, &payload);
+            } else {
+                // Delete
+                let max_del = (len / 2).max(1);
+                let del_len = (rng.range(max_del as u64) as u32).max(1);
+                let start = rng.range((len.saturating_sub(del_len) + 1) as u64) as u32;
+                doc.remove_range(start, del_len.min(len.saturating_sub(start)));
+            }
+        }
+    }
+
+    /// EQUIVALENCE PROPERTY: a CRDT session's final snapshot, when compiled
+    /// into a Mosaic patch over the line graph of the original text, must
+    /// reproduce the *same* sequence of lines as flattening the resulting
+    /// graph. Verified across many random op sequences from different seeds.
+    #[test]
+    fn yjs_to_pijul_equivalence_under_random_ops() {
+        const ROUNDS: usize = 32;
+        const OPS_PER_ROUND: usize = 40;
+
+        for round in 0..ROUNDS {
+            let seed = 0xA17C_E771_u64.wrapping_add(round as u64 * 7919);
+            let mut rng = Rng::new(seed);
+
+            let initial = "line a\nline b\nline c\n";
+            let doc = CrdtDoc::from_text(initial);
+            apply_random_edits(&doc, &mut rng, OPS_PER_ROUND);
+            let after = doc.snapshot();
+
+            let creator = Hash::of(format!("equiv-round-{round}").as_bytes());
+            let commit = compile_session(&creator, initial, &after)
+                .expect("compile_session always succeeds for pure-text diffs");
+
+            let graph_lines: Vec<String> = commit
+                .graph_after
+                .flatten()
+                .into_iter()
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+                .collect();
+
+            let expected_lines: Vec<String> = after
+                .split_inclusive('\n')
+                .map(|s| s.trim_end_matches('\n').to_string())
+                .collect();
+
+            assert_eq!(
+                graph_lines, expected_lines,
+                "round {round} (seed {seed:#x}) diverged.\n\
+                 after text:\n{after}\n\
+                 graph lines: {graph_lines:?}\n\
+                 expected:    {expected_lines:?}",
+            );
+        }
+    }
+
+    /// CONVERGENCE PROPERTY: two peers exchanging Yjs updates after random
+    /// concurrent edits MUST end up with byte-identical snapshots — this is
+    /// the CRDT guarantee the live-collab layer relies on.
+    #[test]
+    fn two_peers_converge_under_random_concurrent_edits() {
+        const ROUNDS: usize = 16;
+        const OPS_PER_PEER: usize = 25;
+
+        for round in 0..ROUNDS {
+            let seed = 0x5EED_C0DE_u64.wrapping_add(round as u64 * 7919);
+            let mut rng_a = Rng::new(seed);
+            let mut rng_b = Rng::new(seed ^ 0xFFFF_FFFF_FFFF_FFFF);
+
+            let alice = CrdtDoc::from_text("shared\nseed\n");
+            let bob = CrdtDoc::new();
+            let bootstrap = alice
+                .encode_update_since(&bob.state_vector())
+                .expect("encode bootstrap");
+            bob.apply_update(&bootstrap).unwrap();
+            assert_eq!(alice.snapshot(), bob.snapshot(), "bootstrap diverged");
+
+            apply_random_edits(&alice, &mut rng_a, OPS_PER_PEER);
+            apply_random_edits(&bob, &mut rng_b, OPS_PER_PEER);
+
+            // Exchange in both directions.
+            let from_a = alice
+                .encode_update_since(&bob.state_vector())
+                .expect("encode A");
+            let from_b = bob
+                .encode_update_since(&alice.state_vector())
+                .expect("encode B");
+            bob.apply_update(&from_a).unwrap();
+            alice.apply_update(&from_b).unwrap();
+
+            assert_eq!(
+                alice.snapshot(),
+                bob.snapshot(),
+                "round {round} (seed {seed:#x}) diverged after exchange",
+            );
+        }
+    }
+
     #[test]
     fn live_session_then_commit_round_trip() {
         let doc = CrdtDoc::from_text("one\ntwo\nthree\n");
