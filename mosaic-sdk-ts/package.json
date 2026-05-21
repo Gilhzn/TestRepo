@@ -1,0 +1,25 @@
+{
+  "name": "mosaic-sdk",
+  "version": "0.0.1",
+  "description": "TypeScript SDK for Mosaic VCS",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc && node --test dist/test/*.test.js"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "Apache-2.0 OR MIT",
+  "devDependencies": {
+    "@types/node": "^20.19.41",
+    "typescript": "^5"
+  }
+}

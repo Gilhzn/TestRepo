@@ -1,2 +1,5 @@
 /target
 .mosaic/
+mosaic-sdk-ts/node_modules/
+mosaic-sdk-ts/dist/
+mosaic-sdk-ts/package-lock.json

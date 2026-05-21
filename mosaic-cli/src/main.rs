@@ -363,15 +363,19 @@ fn bundle_create(out: &PathBuf, branch: Option<&str>) -> Result<(), AppError> {
         .into_iter()
         .map(mosaic_core::m1::change::ChangeId)
         .collect();
-    let bundle = mosaic_core::sync::build_bundle(&repo, &ordered)?;
+    let bundle = match branch {
+        Some(name) => mosaic_core::sync::build_bundle_for_branch(&repo, name, &ordered)?,
+        None => mosaic_core::sync::build_bundle(&repo, &ordered)?,
+    };
     let bytes = bundle.encode()?;
     fs::write(out, &bytes)?;
     println!(
-        "wrote bundle {} ({} changes, {} blobs, {} bytes)",
+        "wrote bundle {} ({} changes, {} blobs, {} bytes, {} branch advances)",
         out.display(),
         bundle.changes.len(),
         bundle.blobs.len(),
-        bytes.len()
+        bytes.len(),
+        bundle.branch_advances.len(),
     );
     Ok(())
 }

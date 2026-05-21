@@ -68,7 +68,7 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ✅ Session API: begin/edit/abort/commit → atomic Change
 - ✅ Speculation: branch / promote / discard for trial-and-error work
 - ✅ attach_as_agent for agent-scoped identities inside human repos
-- ⬜ TypeScript SDK (`mosaic-sdk-ts`)
+- ✅ TypeScript SDK (`mosaic-sdk-ts`): MosaicClient over HTTP, full types
 - ⬜ Agent identity attestation (Sigstore-style)
 
 ## 🔨 M7 — Scale + forge
@@ -81,4 +81,4 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 
 ---
 
-## Current test count: **136 / 136 passing**
+## Current test count: **136 Rust + 4 TypeScript = 140 / 140 passing**
