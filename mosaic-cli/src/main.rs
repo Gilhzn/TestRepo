@@ -58,6 +58,19 @@ enum Cmd {
     /// Import history from another VCS.
     #[command(subcommand)]
     Import(ImportCmd),
+    /// Three-way merge a file across the patch + semantic layers.
+    Merge {
+        /// In-repo path (used to pick the language for semantic analysis).
+        path: String,
+        #[arg(long)]
+        base: PathBuf,
+        #[arg(long)]
+        ours: PathBuf,
+        #[arg(long)]
+        theirs: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Run an end-to-end demo of two agents editing in parallel and merging cleanly.
     Demo,
 }
@@ -126,6 +139,13 @@ fn main() -> ExitCode {
         Cmd::Bundle(BundleCmd::Apply { path }) => run(|| bundle_apply(&path)),
         Cmd::Bundle(BundleCmd::Inspect { path }) => run(|| bundle_inspect(&path)),
         Cmd::Import(ImportCmd::Git { path }) => run(|| import_git_cmd(&path)),
+        Cmd::Merge {
+            path,
+            base,
+            ours,
+            theirs,
+            out,
+        } => run(|| merge_cmd(&path, &base, &ours, &theirs, out.as_deref())),
         Cmd::Demo => run(demo),
     }
 }
@@ -336,6 +356,71 @@ fn bundle_apply(path: &PathBuf) -> Result<(), AppError> {
     );
     for id in &report.applied {
         println!("  + {}", &id.to_hex()[..16]);
+    }
+    Ok(())
+}
+
+fn merge_cmd(
+    path: &str,
+    base: &PathBuf,
+    ours: &PathBuf,
+    theirs: &PathBuf,
+    out: Option<&std::path::Path>,
+) -> Result<(), AppError> {
+    let base_s = fs::read_to_string(base)?;
+    let ours_s = fs::read_to_string(ours)?;
+    let theirs_s = fs::read_to_string(theirs)?;
+    let creator = Hash::of(path.as_bytes());
+    let lang = mosaic_core::ast::Lang::from_path(path);
+    let result = mosaic_core::merge_strategies::merge_text_file(
+        &creator, lang, &base_s, &ours_s, &theirs_s,
+    )?;
+
+    let merged: String = result
+        .merged_lines
+        .iter()
+        .map(|l| format!("{l}\n"))
+        .collect();
+    match out {
+        Some(p) => {
+            fs::write(p, &merged)?;
+            println!("wrote merged result to {}", p.display());
+        }
+        None => {
+            println!("--- merged result ---");
+            print!("{merged}");
+            println!("--- end ---");
+        }
+    }
+
+    println!();
+    println!("patch-level conflicts: {}", result.patch_conflicts.len());
+    if !result.semantic_hints.is_empty() {
+        println!("semantic hints:");
+        for hint in &result.semantic_hints {
+            match hint {
+                mosaic_core::semantic::SemanticHint::DefinitionRenamed { from, to, kind } => {
+                    println!("  rename {kind} {from} -> {to}");
+                }
+                mosaic_core::semantic::SemanticHint::DefinitionEdited { name, kind } => {
+                    println!("  edit   {kind} {name}");
+                }
+                mosaic_core::semantic::SemanticHint::DefinitionAdded { name, kind } => {
+                    println!("  add    {kind} {name}");
+                }
+                mosaic_core::semantic::SemanticHint::DefinitionRemoved { name, kind } => {
+                    println!("  remove {kind} {name}");
+                }
+                mosaic_core::semantic::SemanticHint::CallSiteUsesOldName {
+                    old_name,
+                    new_name,
+                    line,
+                    column,
+                } => {
+                    println!("  callsite at {line}:{column} uses old name {old_name} (now {new_name})");
+                }
+            }
+        }
     }
     Ok(())
 }

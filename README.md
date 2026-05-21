@@ -30,12 +30,12 @@ now live in.
 
 ## Status
 
-This is an active build of the M1 milestone (storage + change model + patch
-algebra + branch frontiers). The CLI exercises every piece end to end.
+Active build progressing through the 8-milestone roadmap. **3 milestones
+fully complete (M0/M1/M2), 3 with working kernels (M3/M5/M6), 2 untouched
+(M4/M7).** See `ROADMAP.md` for the live status checklist.
 
-- 79 unit tests across the workspace, 0 failures
+- **129 unit tests** across the workspace, 0 failures
 - The full architecture spec lives in `/root/.claude/plans/lexical-wibbling-whistle.md`
-  (12-month roadmap from storage spine to public beta)
 
 ## Try it
 
@@ -64,29 +64,86 @@ Three independent edits to the same source file, two on disjoint regions
 (auto-merged, zero conflicts) and two on the same anchor (merged into a valid
 graph with one structured `ConcurrentInsert` conflict an agent can resolve).
 
+## See the semantic-merge thesis in action
+
+```bash
+# base: fn chargeCard
+# ours: renamed to processCharge
+# theirs: kept old name, but changed body
+mos merge payments.rs --base base.rs --ours ours.rs --theirs theirs.rs
+```
+
+Output:
+
+```
+--- merged result ---
+fn processCharge(amount: u32) -> u32 {
+    log_call();
+    amount * 2
+}
+--- end ---
+
+semantic hints:
+  rename function_item chargeCard -> processCharge
+  callsite at 1:4 uses old name chargeCard (now processCharge)
+```
+
+Mosaic picks up both the rename (from `ours`) and the body edit (from
+`theirs`) and surfaces a structured hint about an old-name reference for
+an AI or a human resolver to act on.
+
+## Bundle-based sync between two repositories
+
+```bash
+# Alice
+cd alice/
+mos bundle create -o /tmp/alice.bundle
+
+# Bob, on another machine or directory:
+cd bob/
+mos bundle apply /tmp/alice.bundle  # signatures verified end-to-end
+mos log                              # sees Alice's history
+```
+
+## Import an existing Git repository
+
+```bash
+mos init && mos id setup --email you@example.com
+mos import git /path/to/some/git/repo
+mos log
+```
+
+Walks the full Git history (including merges) in topological-oldest-first
+order, preserving authorship metadata in the change intent.
+
 ## Layout
 
 ```
-mosaic-core/
+mosaic-core/                Core library
   src/
-    hash.rs           BLAKE3 + streaming hasher
-    storage.rs        FsCas: zstd-compressed loose-object CAS
-    chunker.rs        FastCDC for large blobs, with Manifest + reassemble
-    m1/
-      identity.rs     Human | Agent (validated, depth-capped)
-      signing.rs      ed25519 wrappers
-      change.rs       Change, ChangeId, ChangeBuilder, Tai64N, FileChange
-    m1_dag/
-      vclock.rs       VectorClock with merge / happens_before / partial_cmp
-      dag.rs          ChangeStore, FsChangeStore, DagIndex (Kahn topo, LCA)
-      refs.rs         Branch frontiers + atomic RefStore
-    m1_patch/
-      line_graph.rs   LineGraph with sentinel root/sink, deterministic flatten
-      patch.rs        Op, Patch (atomic apply, inverse via demote-to-kill)
-      merge.rs        commute(), three_way_merge(), StructuredConflict
-    repo.rs           Repository facade: storage + DAG + refs + identity
-mosaic-cli/
-  src/main.rs         `mos` binary (init, id, commit, log, branch, demo, …)
+    hash.rs                 BLAKE3 + streaming hasher
+    storage.rs              FsCas: zstd-compressed loose-object CAS
+    chunker.rs              FastCDC large-file chunking + manifest
+    m1/{identity,signing,change}.rs    Identity, ed25519, Change schema
+    m1_dag/{vclock,dag,refs}.rs        Vector clocks, DAG, branch frontiers
+    m1_patch/{line_graph,patch,merge}.rs  Commutative patches, three-way merge
+    repo.rs                 Repository facade
+    sync.rs                 Bundle format + frontier diff + apply
+    import_git.rs           Read-only Git import bridge
+    crdt.rs                 yrs working-copy + session→patch compiler
+    ast.rs                  tree-sitter AST + content-addressable hashes
+    semantic.rs             Rename detection + call-site hints
+    merge_strategies.rs     Combined patch + semantic merge facade
+
+mosaic-sdk/                 Agent-native Rust SDK
+  src/
+    agent.rs                MosaicAgent: init / attach / sessions / speculation
+    session.rs              Stage edits → atomic signed Change
+    speculation.rs          Cheap parallel branches an agent can promote/discard
+
+mosaic-cli/                 `mos` command-line binary
+  src/main.rs               init / id / commit / log / branch / bundle /
+                            import / merge / put / cat / stats / demo
 ```
 
 ## Next milestones
