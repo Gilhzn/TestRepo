@@ -52,8 +52,26 @@ enum Cmd {
     },
     /// Storage statistics.
     Stats,
+    /// Bundle changes for transport to another repo.
+    #[command(subcommand)]
+    Bundle(BundleCmd),
     /// Run an end-to-end demo of two agents editing in parallel and merging cleanly.
     Demo,
+}
+
+#[derive(Subcommand)]
+enum BundleCmd {
+    /// Write a bundle of all local changes (or of a specific branch) to a file.
+    Create {
+        #[arg(short, long)]
+        out: PathBuf,
+        #[arg(short, long)]
+        branch: Option<String>,
+    },
+    /// Apply a bundle file into the current repo.
+    Apply { path: PathBuf },
+    /// Inspect a bundle without applying it.
+    Inspect { path: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -93,6 +111,11 @@ fn main() -> ExitCode {
         Cmd::Put { path } => run(|| put(&path)),
         Cmd::Cat { hash, out } => run(|| cat(&hash, out.as_deref())),
         Cmd::Stats => run(stats),
+        Cmd::Bundle(BundleCmd::Create { out, branch }) => {
+            run(|| bundle_create(&out, branch.as_deref()))
+        }
+        Cmd::Bundle(BundleCmd::Apply { path }) => run(|| bundle_apply(&path)),
+        Cmd::Bundle(BundleCmd::Inspect { path }) => run(|| bundle_inspect(&path)),
         Cmd::Demo => run(demo),
     }
 }
@@ -256,6 +279,70 @@ fn stats() -> Result<(), AppError> {
     println!("blobs:       {blob_count} ({blob_bytes} bytes on disk)");
     println!("changes:     {change_count}");
     println!("branches:    {branches}");
+    Ok(())
+}
+
+fn bundle_create(out: &PathBuf, branch: Option<&str>) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let ids: Vec<mosaic_core::m1::change::ChangeId> = match branch {
+        Some(name) => {
+            let tips = repo.refs().get(name)?;
+            let empty = mosaic_core::m1_dag::refs::Frontier::default();
+            mosaic_core::sync::missing_changes_for(&repo, &empty, &tips)
+        }
+        None => repo
+            .all_change_ids()?
+            .into_iter()
+            .map(mosaic_core::m1::change::ChangeId)
+            .collect(),
+    };
+    let ordered = repo.topo_order(&ids.iter().map(|c| c.0).collect());
+    let ordered: Vec<mosaic_core::m1::change::ChangeId> = ordered
+        .into_iter()
+        .map(mosaic_core::m1::change::ChangeId)
+        .collect();
+    let bundle = mosaic_core::sync::build_bundle(&repo, &ordered)?;
+    let bytes = bundle.encode()?;
+    fs::write(out, &bytes)?;
+    println!(
+        "wrote bundle {} ({} changes, {} blobs, {} bytes)",
+        out.display(),
+        bundle.changes.len(),
+        bundle.blobs.len(),
+        bytes.len()
+    );
+    Ok(())
+}
+
+fn bundle_apply(path: &PathBuf) -> Result<(), AppError> {
+    let mut repo = open_here()?;
+    let bytes = fs::read(path)?;
+    let bundle = mosaic_core::sync::Bundle::decode(&bytes)?;
+    let report = mosaic_core::sync::apply_bundle(&mut repo, &bundle)?;
+    println!(
+        "applied {} change(s), skipped {} duplicate(s)",
+        report.applied.len(),
+        report.skipped.len()
+    );
+    for id in &report.applied {
+        println!("  + {}", &id.to_hex()[..16]);
+    }
+    Ok(())
+}
+
+fn bundle_inspect(path: &PathBuf) -> Result<(), AppError> {
+    let bytes = fs::read(path)?;
+    let bundle = mosaic_core::sync::Bundle::decode(&bytes)?;
+    println!("bundle: {} changes, {} blobs", bundle.changes.len(), bundle.blobs.len());
+    for change in &bundle.changes {
+        let intent = change.intent.as_deref().unwrap_or("(no intent)");
+        println!(
+            "  {}  {}  by {}",
+            &change.id().to_hex()[..12],
+            intent,
+            change.author.display()
+        );
+    }
     Ok(())
 }
 

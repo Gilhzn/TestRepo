@@ -11,6 +11,7 @@ pub mod m1_dag;
 pub mod m1_patch;
 pub mod repo;
 pub mod storage;
+pub mod sync;
 
 pub use error::Error;
 pub use hash::Hash;
