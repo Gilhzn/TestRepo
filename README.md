@@ -105,6 +105,30 @@ mos bundle apply /tmp/alice.bundle  # signatures verified end-to-end
 mos log                              # sees Alice's history
 ```
 
+## Two AI agents collaborating in real-time
+
+End-to-end demo from the TypeScript SDK that ties every layer together:
+
+```bash
+cd mosaic-sdk-ts
+npm install && npx tsc
+node dist/examples/two-agents.js
+```
+
+Output (excerpted):
+
+```
+[14:58:50] system     starting mosaic-serve at http://127.0.0.1:44129
+[14:58:50] system     agents joining live room /ws/doc/payments.ts
+[14:58:50] agent-A    sending: 'fn chargeCard() { ... }'
+[14:58:50] agent-B    received update (23B): fn chargeCard() { ... }
+[14:58:50] agent-B    sending: 'fn fraudCheck() { ... }'
+[14:58:50] agent-A    received update (23B): fn fraudCheck() { ... }
+[14:58:50] agent-A    pushing to server
+[14:58:50] agent-A    push result: 1 applied, 0 skipped
+[14:58:50] system     server now has 1 change(s) on 1 branch(es)
+```
+
 ## Import an existing Git repository
 
 ```bash
