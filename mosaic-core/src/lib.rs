@@ -9,11 +9,12 @@ pub mod crdt;
 pub mod error;
 pub mod hash;
 pub mod import_git;
-pub mod semantic;
 pub mod m1;
 pub mod m1_dag;
 pub mod m1_patch;
+pub mod merge_strategies;
 pub mod repo;
+pub mod semantic;
 pub mod storage;
 pub mod sync;
 

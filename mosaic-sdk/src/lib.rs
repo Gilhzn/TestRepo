@@ -18,4 +18,5 @@ pub use mosaic_core::error::Error;
 pub use mosaic_core::m1::change::{ChangeId, FileKind};
 pub use mosaic_core::m1::identity::Identity;
 pub use mosaic_core::m1::signing::SigningKey;
+pub use mosaic_core::merge_strategies::FileMerge;
 pub use mosaic_core::semantic::{SemanticHint, ThreeWaySemanticReport};

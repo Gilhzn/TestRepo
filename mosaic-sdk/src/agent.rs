@@ -2,10 +2,12 @@ use crate::session::Session;
 use crate::speculation::Speculation;
 use mosaic_core::ast::Lang;
 use mosaic_core::error::{Error, Result};
+use mosaic_core::hash::Hash;
 use mosaic_core::m1::change::ChangeId;
 use mosaic_core::m1::identity::Identity;
 use mosaic_core::m1::signing::SigningKey;
 use mosaic_core::m1_dag::refs::Frontier;
+use mosaic_core::merge_strategies::{merge_text_file, FileMerge};
 use mosaic_core::repo::Repository;
 use mosaic_core::semantic::{analyze_three_way, ThreeWaySemanticReport};
 use std::path::{Path, PathBuf};
@@ -155,6 +157,21 @@ impl MosaicAgent {
         theirs: &[u8],
     ) -> Result<ThreeWaySemanticReport> {
         analyze_three_way(lang, base, ours, theirs)
+    }
+
+    /// Three-way merge a single text file across both layers (patch +
+    /// semantic). Returns merged lines, patch-level conflicts (data, not
+    /// markers), and any AST-level hints such as detected renames.
+    pub fn merge_file(
+        &self,
+        path: &str,
+        base: &str,
+        ours: &str,
+        theirs: &str,
+    ) -> Result<FileMerge> {
+        let creator = Hash::of(path.as_bytes());
+        let lang = Lang::from_path(path);
+        merge_text_file(&creator, lang, base, ours, theirs)
     }
 
     pub(crate) fn open_repo(&self) -> Result<Repository> {

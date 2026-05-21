@@ -52,8 +52,9 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ✅ Definition extraction (functions, structs, classes, interfaces)
 - ✅ Rename detection via body-hash matching
 - ✅ Three-way semantic analysis with call-site hints
+- ✅ Wire into merge engine as 3rd fallback strategy (`merge_text_file`)
+- ✅ SDK exposure: `MosaicAgent::merge_file` / `analyze_three_way`
 - ⬜ Full GumTree algorithm (research-grade)
-- ⬜ Wire into merge engine as 3rd fallback strategy
 - ⬜ "Explain my merge" UI affordance
 
 ## 🔨 M6 — Agent SDK
@@ -73,4 +74,4 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 
 ---
 
-## Current test count: **124 / 124 passing**
+## Current test count: **129 / 129 passing**
