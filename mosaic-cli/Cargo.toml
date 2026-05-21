@@ -1,0 +1,17 @@
+[package]
+name = "mosaic-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Mosaic VCS command-line interface"
+
+[[bin]]
+name = "mos"
+path = "src/main.rs"
+
+[dependencies]
+mosaic-core = { path = "../mosaic-core" }
+clap.workspace = true
+thiserror.workspace = true
+bincode.workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "mosaic-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Mosaic VCS core: content-addressable storage, change model, merge engine"
+
+[dependencies]
+blake3.workspace = true
+zstd.workspace = true
+fastcdc.workspace = true
+thiserror.workspace = true
+serde = { workspace = true }
+bincode.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

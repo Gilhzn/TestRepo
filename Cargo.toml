@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "mosaic-core",
+    "mosaic-cli",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.78"
+license = "Apache-2.0 OR MIT"
+
+[workspace.dependencies]
+blake3 = "1.5"
+zstd = "0.13"
+fastcdc = "3.1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
+hex = "0.4"
+tempfile = "3"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
