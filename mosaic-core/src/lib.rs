@@ -4,6 +4,7 @@
 //! See `/root/.claude/plans/lexical-wibbling-whistle.md` for the full architecture.
 
 pub mod chunker;
+pub mod crdt;
 pub mod error;
 pub mod hash;
 pub mod import_git;

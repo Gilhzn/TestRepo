@@ -23,6 +23,8 @@ tempfile = "3"
 clap = { version = "4", features = ["derive"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
+yrs = "0.18"
+similar = "2"
 
 [profile.release]
 lto = "thin"

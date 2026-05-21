@@ -33,8 +33,10 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ✅ Tests: 10
 
 ## 🔨 M3 — CRDT integration
-- ⬜ yrs working-copy CRDT doc per text file
-- ⬜ Yjs ops ↔ patch compiler (with equivalence proof)
+- ✅ yrs working-copy CRDT doc per text file (two-peer convergence)
+- ✅ Yjs state-vector based delta sync
+- ✅ Session compiler: before/after text → Mosaic Patch (line-graph)
+- ⬜ Full equivalence proof: Yjs op-by-op → Pijul ops (research-grade)
 - ⬜ LSP server (`mosaic-lsp`)
 - ⬜ VS Code extension alpha
 
@@ -65,4 +67,4 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 
 ---
 
-## Current test count: **89 / 89 passing**
+## Current test count: **96 / 96 passing**

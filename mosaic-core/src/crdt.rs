@@ -1,0 +1,320 @@
+//! CRDT working-copy bridge.
+//!
+//! A text file under live editing is represented by a Yjs `Y.Text` (via the
+//! `yrs` port). Multiple peers can hold one of these per file and merge
+//! state in either direction with strong eventual consistency.
+//!
+//! At commit time the diff between two materialized states is compiled into
+//! a Mosaic `Patch` over the file's line graph — the canonical form used by
+//! the rest of the system. The roles are:
+//!
+//!   * **Yjs** — the live, real-time editing model (M3+M4).
+//!   * **Patches** — the durable, signed-history model (M1).
+//!
+//! These coexist: every change born in a CRDT session compiles down to a
+//! patch on commit; downstream readers replay patches and never need yrs.
+
+use crate::error::Result;
+use crate::hash::Hash;
+use crate::m1_patch::line_graph::{LineGraph, Vertex, VertexId};
+use crate::m1_patch::patch::{Op, Patch};
+use similar::{ChangeTag, TextDiff};
+use yrs::updates::decoder::Decode;
+use yrs::updates::encoder::Encode;
+use yrs::{Doc, GetString, ReadTxn, StateVector, Text, TextRef, Transact, Update};
+
+/// One live text document. Each peer holds an independent `CrdtDoc`; updates
+/// produced by `encode_update_since` and applied by `apply_update` reconcile
+/// state across peers.
+pub struct CrdtDoc {
+    doc: Doc,
+    text: TextRef,
+}
+
+impl CrdtDoc {
+    pub fn new() -> Self {
+        let doc = Doc::new();
+        let text = doc.get_or_insert_text("content");
+        Self { doc, text }
+    }
+
+    pub fn from_text(initial: &str) -> Self {
+        let me = Self::new();
+        let mut txn = me.doc.transact_mut();
+        me.text.insert(&mut txn, 0, initial);
+        drop(txn);
+        me
+    }
+
+    pub fn snapshot(&self) -> String {
+        let txn = self.doc.transact();
+        self.text.get_string(&txn)
+    }
+
+    pub fn insert(&self, index: u32, s: &str) {
+        let mut txn = self.doc.transact_mut();
+        self.text.insert(&mut txn, index, s);
+    }
+
+    pub fn remove_range(&self, index: u32, len: u32) {
+        let mut txn = self.doc.transact_mut();
+        self.text.remove_range(&mut txn, index, len);
+    }
+
+    pub fn state_vector(&self) -> Vec<u8> {
+        let txn = self.doc.transact();
+        txn.state_vector().encode_v1()
+    }
+
+    pub fn encode_update_since(&self, peer_state_vector: &[u8]) -> Result<Vec<u8>> {
+        let sv = StateVector::decode_v1(peer_state_vector)
+            .map_err(|e| crate::error::Error::Serialization(format!("bad state vector: {e}")))?;
+        let txn = self.doc.transact();
+        Ok(txn.encode_state_as_update_v1(&sv))
+    }
+
+    pub fn apply_update(&self, update_bytes: &[u8]) -> Result<()> {
+        let update = Update::decode_v1(update_bytes)
+            .map_err(|e| crate::error::Error::Serialization(format!("bad update: {e}")))?;
+        let mut txn = self.doc.transact_mut();
+        txn.apply_update(update);
+        Ok(())
+    }
+
+}
+
+impl Default for CrdtDoc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Compile a before/after text pair into a Mosaic patch on a line graph.
+///
+/// This is the durable form of "what an editing session changed." The
+/// resulting `Patch` can be applied to a `LineGraph` built from `before`
+/// and will reproduce `after` (modulo CRDT identity assignment of the new
+/// lines).
+pub struct LiveCommit {
+    pub patch: Patch,
+    pub graph_after: LineGraph,
+}
+
+pub fn compile_session(creator: &Hash, before: &str, after: &str) -> Result<LiveCommit> {
+    let before_lines: Vec<&str> = before.split_inclusive('\n').collect();
+    let after_lines: Vec<&str> = after.split_inclusive('\n').collect();
+
+    let mut before_for_graph: Vec<&[u8]> = before_lines
+        .iter()
+        .map(|s| trim_newline(s.as_bytes()))
+        .collect();
+    if before.is_empty() {
+        before_for_graph.clear();
+    }
+    let mut graph = LineGraph::from_lines(creator, &before_for_graph);
+
+    let diff = TextDiff::from_slices(&before_lines, &after_lines);
+
+    let mut ops: Vec<Op> = Vec::new();
+
+    let mut before_line_index = 0u64;
+    let mut emitted_index: u64 = 0;
+
+    let mut anchors: Vec<VertexId> = Vec::with_capacity(before_lines.len() + 2);
+    anchors.push(graph.root_id());
+    for (i, line) in before_for_graph.iter().enumerate() {
+        anchors.push(VertexId::derive(creator, i as u64, line));
+    }
+    anchors.push(graph.sink_id());
+
+    let mut alive_anchors = anchors.clone();
+    let mut cursor = 0usize;
+
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Equal => {
+                before_line_index += 1;
+                cursor += 1;
+            }
+            ChangeTag::Delete => {
+                let target = anchors[before_line_index as usize + 1];
+                ops.push(Op::Kill { target });
+                let pos = alive_anchors
+                    .iter()
+                    .position(|a| *a == target)
+                    .expect("anchor present");
+                alive_anchors.remove(pos);
+                before_line_index += 1;
+            }
+            ChangeTag::Insert => {
+                let line_bytes = trim_newline(change.value().as_bytes()).to_vec();
+                let new_vid = VertexId::derive(creator, 1_000_000 + emitted_index, &line_bytes);
+                emitted_index += 1;
+                let new_vertex = Vertex {
+                    id: new_vid,
+                    bytes: line_bytes,
+                    alive: true,
+                };
+                let anchor = alive_anchors[cursor];
+                let before_anchor = alive_anchors[cursor + 1];
+                ops.push(Op::InsertAfter {
+                    anchor,
+                    before: before_anchor,
+                    vertex: new_vertex,
+                });
+                alive_anchors.insert(cursor + 1, new_vid);
+                cursor += 1;
+            }
+        }
+    }
+
+    let patch = Patch::from_ops(ops);
+    patch.apply(&mut graph)?;
+    Ok(LiveCommit {
+        patch,
+        graph_after: graph,
+    })
+}
+
+fn trim_newline(bytes: &[u8]) -> &[u8] {
+    if let Some(stripped) = bytes.strip_suffix(b"\n") {
+        stripped
+    } else {
+        bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_peers_converge_on_concurrent_inserts() {
+        let alice = CrdtDoc::from_text("hello\nworld\n");
+        let bob = CrdtDoc::new();
+        let initial_update = alice.encode_update_since(&bob.state_vector()).unwrap();
+        bob.apply_update(&initial_update).unwrap();
+        assert_eq!(alice.snapshot(), bob.snapshot());
+
+        alice.insert(6, "lovely ");
+        bob.insert(0, "PREFIX ");
+
+        let sv_a = alice.state_vector();
+        let sv_b = bob.state_vector();
+        let from_a = alice.encode_update_since(&sv_b).unwrap();
+        let from_b = bob.encode_update_since(&sv_a).unwrap();
+        bob.apply_update(&from_a).unwrap();
+        alice.apply_update(&from_b).unwrap();
+
+        assert_eq!(alice.snapshot(), bob.snapshot());
+        let s = alice.snapshot();
+        assert!(s.contains("lovely"));
+        assert!(s.contains("PREFIX"));
+    }
+
+    #[test]
+    fn deletes_propagate_across_peers() {
+        let alice = CrdtDoc::from_text("aaa\nbbb\nccc\n");
+        let bob = CrdtDoc::new();
+        let up = alice.encode_update_since(&bob.state_vector()).unwrap();
+        bob.apply_update(&up).unwrap();
+
+        bob.remove_range(4, 4);
+        let to_alice = bob.encode_update_since(&alice.state_vector()).unwrap();
+        alice.apply_update(&to_alice).unwrap();
+
+        assert_eq!(alice.snapshot(), bob.snapshot());
+        assert_eq!(alice.snapshot(), "aaa\nccc\n");
+    }
+
+    #[test]
+    fn compile_session_inserts_one_line() {
+        let creator = Hash::of(b"session-1");
+        let result = compile_session(&creator, "alpha\nbeta\n", "alpha\nNEW\nbeta\n").unwrap();
+        let lines: Vec<&str> = result
+            .graph_after
+            .flatten()
+            .into_iter()
+            .map(|b| std::str::from_utf8(b).unwrap())
+            .collect();
+        assert_eq!(lines, vec!["alpha", "NEW", "beta"]);
+    }
+
+    #[test]
+    fn compile_session_deletes_one_line() {
+        let creator = Hash::of(b"session-2");
+        let result = compile_session(&creator, "alpha\nbeta\nGAMMA\n", "alpha\nbeta\n").unwrap();
+        let lines: Vec<&str> = result
+            .graph_after
+            .flatten()
+            .into_iter()
+            .map(|b| std::str::from_utf8(b).unwrap())
+            .collect();
+        assert_eq!(lines, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn compile_session_handles_replace_block() {
+        let creator = Hash::of(b"session-3");
+        let result = compile_session(
+            &creator,
+            "header\nbody1\nbody2\nfooter\n",
+            "header\nNEW1\nNEW2\nNEW3\nfooter\n",
+        )
+        .unwrap();
+        let lines: Vec<&str> = result
+            .graph_after
+            .flatten()
+            .into_iter()
+            .map(|b| std::str::from_utf8(b).unwrap())
+            .collect();
+        assert_eq!(lines, vec!["header", "NEW1", "NEW2", "NEW3", "footer"]);
+    }
+
+    #[test]
+    fn compile_session_from_empty_file() {
+        let creator = Hash::of(b"session-empty");
+        let result = compile_session(&creator, "", "first line\nsecond\n").unwrap();
+        let lines: Vec<&str> = result
+            .graph_after
+            .flatten()
+            .into_iter()
+            .map(|b| std::str::from_utf8(b).unwrap())
+            .collect();
+        assert_eq!(lines, vec!["first line", "second"]);
+    }
+
+    #[test]
+    fn live_session_then_commit_round_trip() {
+        let doc = CrdtDoc::from_text("one\ntwo\nthree\n");
+        let before = doc.snapshot();
+        doc.insert(4, "NEW_AFTER_ONE\n");
+        doc.remove_range(
+            (before.len() as u32) + "NEW_AFTER_ONE\n".len() as u32 - 6,
+            6,
+        );
+        let after = doc.snapshot();
+
+        let creator = Hash::of(b"live-1");
+        let commit = compile_session(&creator, &before, &after).unwrap();
+        let lines: Vec<String> = commit
+            .graph_after
+            .flatten()
+            .into_iter()
+            .map(|b| String::from_utf8(b.to_vec()).unwrap())
+            .collect();
+
+        let mut from_after = after.split_inclusive('\n').collect::<Vec<_>>();
+        if from_after.last().map(|s| !s.ends_with('\n')).unwrap_or(false) {
+            // no trailing newline — fine
+        } else {
+            from_after.retain(|s| !s.is_empty());
+        }
+        let expected: Vec<String> = from_after
+            .iter()
+            .map(|s| s.trim_end_matches('\n').to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(lines, expected);
+    }
+}

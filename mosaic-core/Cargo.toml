@@ -16,6 +16,8 @@ bincode.workspace = true
 hex.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
+yrs.workspace = true
+similar.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
