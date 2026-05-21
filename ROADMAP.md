@@ -47,10 +47,14 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ✅ Branch-aware bundles: branch_advances ride along with push
 - ✅ CLI: `mos remote add/list/remove`, `mos push/pull`
 - ✅ Two-machine multi-direction sync verified end-to-end
-- ⬜ WebSocket hub (y-websocket protocol) for live co-editing
-- ⬜ WebRTC P2P fallback
-- ⬜ Awareness / presence channel
-- ⬜ Agent session protocol (session → atomic change stamp)
+- ✅ WebSocket relay (`/ws/doc/:name`): broadcasts binary CRDT updates
+  between peers, replays history to late joiners, per-document rooms
+- ✅ Rust SDK live client (`mosaic-sdk::live::LiveSession`) behind `live`
+  feature flag
+- ✅ TypeScript SDK live client (`LiveSession.connect()`)
+- ⬜ WebRTC P2P fallback (server-optional path)
+- ⬜ Awareness / presence channel (cursor positions, selections)
+- ⬜ Server-side compaction of the update log
 
 ## 🔨 M5 — Semantic merge
 - ✅ tree-sitter integration (Rust, Python, TypeScript)
@@ -82,4 +86,4 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 
 ---
 
-## Current test count: **143 Rust + 4 TypeScript = 147 / 147 passing**
+## Current test count: **150 Rust + 6 TypeScript = 156 / 156 passing**

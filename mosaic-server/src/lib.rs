@@ -35,11 +35,13 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub mod auth;
+pub mod ws;
 
 pub struct AppState {
     repo_root: PathBuf,
     lock: Mutex<()>,
     policy: auth::Policy,
+    pub live: Arc<ws::LiveState>,
 }
 
 impl AppState {
@@ -50,6 +52,7 @@ impl AppState {
             repo_root,
             lock: Mutex::new(()),
             policy,
+            live: Arc::new(ws::LiveState::new()),
         }
     }
 
@@ -58,6 +61,7 @@ impl AppState {
             repo_root: repo_root.into(),
             lock: Mutex::new(()),
             policy,
+            live: Arc::new(ws::LiveState::new()),
         }
     }
 
@@ -80,7 +84,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/changes/:id", get(get_change))
         .route("/api/v1/missing", get(missing))
         .route("/api/v1/bundle", post(post_bundle))
+        .route("/api/v1/live-stats", get(live_stats))
+        .route("/ws/doc/:name", get(ws::ws_handler))
         .with_state(state)
+}
+
+#[derive(Serialize)]
+pub struct LiveStats {
+    pub open_docs: usize,
+}
+
+async fn live_stats(State(s): State<Arc<AppState>>) -> Json<LiveStats> {
+    Json(LiveStats {
+        open_docs: s.live.open_doc_count().await,
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -483,6 +500,102 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200);
 
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_broadcasts_updates_between_peers() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        let dir = TempDir::new().unwrap();
+        let _ = Repository::init(dir.path()).unwrap();
+        let (addr, handle) =
+            serve(dir.path(), "127.0.0.1:0".parse().unwrap()).await.unwrap();
+
+        let url = format!("ws://{addr}/ws/doc/payments.rs");
+
+        let (mut alice, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        // Give Alice's subscriber time to register.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let (mut bob, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Alice sends an update; Bob should receive it.
+        alice
+            .send(WsMsg::Binary(b"hello-from-alice".to_vec()))
+            .await
+            .unwrap();
+
+        let received = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async {
+                while let Some(Ok(msg)) = bob.next().await {
+                    if let WsMsg::Binary(b) = msg {
+                        return b;
+                    }
+                }
+                panic!("bob stream ended without binary message");
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(received, b"hello-from-alice");
+
+        // A new peer Carol connects and immediately receives the replay
+        // (alice's earlier update).
+        let (mut carol, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let replay = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async {
+                while let Some(Ok(msg)) = carol.next().await {
+                    if let WsMsg::Binary(b) = msg {
+                        return b;
+                    }
+                }
+                panic!("carol stream ended without binary message");
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay, b"hello-from-alice");
+
+        let _ = alice.close(None).await;
+        let _ = bob.close(None).await;
+        let _ = carol.close(None).await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_separate_docs_dont_interfere() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        let dir = TempDir::new().unwrap();
+        let _ = Repository::init(dir.path()).unwrap();
+        let (addr, handle) =
+            serve(dir.path(), "127.0.0.1:0".parse().unwrap()).await.unwrap();
+
+        let url_a = format!("ws://{addr}/ws/doc/a");
+        let url_b = format!("ws://{addr}/ws/doc/b");
+
+        let (mut alice, _) = tokio_tungstenite::connect_async(&url_a).await.unwrap();
+        let (mut bob, _) = tokio_tungstenite::connect_async(&url_b).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        alice.send(WsMsg::Binary(b"alice-only".to_vec())).await.unwrap();
+
+        // Bob should NOT receive anything in 200ms.
+        let got = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            bob.next(),
+        )
+        .await;
+        assert!(got.is_err(), "bob received unexpected cross-doc traffic");
+
+        let _ = alice.close(None).await;
+        let _ = bob.close(None).await;
         handle.abort();
     }
 

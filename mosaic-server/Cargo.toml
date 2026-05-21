@@ -23,7 +23,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 hex.workspace = true
 clap.workspace = true
+base64.workspace = true
+futures-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 reqwest.workspace = true
+tokio-tungstenite.workspace = true

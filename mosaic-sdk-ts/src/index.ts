@@ -8,6 +8,7 @@
 
 // Use the runtime's global fetch (Node 18+).
 declare const fetch: (input: string, init?: any) => Promise<any>;
+declare const WebSocket: any;
 
 export interface HealthResponse {
   ok: boolean;
@@ -155,6 +156,71 @@ export class MosaicClient {
       );
     }
     return (await res.json()) as T;
+  }
+}
+
+/**
+ * Real-time co-editing session over WebSocket.
+ *
+ * Each connected peer in the same document name receives every binary
+ * update from every other peer. The server doesn't parse the bytes —
+ * they're typically Yjs (or any other CRDT) update payloads.
+ *
+ * @example
+ *   const session = await LiveSession.connect("ws://server:7700/ws/doc/payments.rs");
+ *   session.onUpdate((bytes) => applyToLocalCrdt(bytes));
+ *   session.send(localUpdate);
+ *   ...
+ *   await session.close();
+ */
+export class LiveSession {
+  private socket: any;
+  private listeners: Array<(bytes: Uint8Array) => void> = [];
+  private closed = false;
+
+  static async connect(url: string): Promise<LiveSession> {
+    const session = new LiveSession();
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url);
+      ws.binaryType = "arraybuffer";
+      ws.onopen = () => {
+        session.socket = ws;
+        ws.onmessage = (ev: any) => {
+          if (ev.data instanceof ArrayBuffer) {
+            const bytes = new Uint8Array(ev.data);
+            for (const fn of session.listeners) fn(bytes);
+          }
+        };
+        ws.onclose = () => {
+          session.closed = true;
+        };
+        ws.onerror = () => {
+          session.closed = true;
+        };
+        resolve(session);
+      };
+      ws.onerror = (err: any) => reject(new MosaicError(`ws connect failed: ${err}`));
+    });
+  }
+
+  onUpdate(fn: (bytes: Uint8Array) => void): void {
+    this.listeners.push(fn);
+  }
+
+  send(update: Uint8Array): void {
+    if (this.closed) throw new MosaicError("session closed");
+    this.socket.send(update);
+  }
+
+  isClosed(): boolean {
+    return this.closed;
+  }
+
+  async close(): Promise<void> {
+    if (!this.closed && this.socket) {
+      this.socket.close();
+      this.closed = true;
+    }
   }
 }
 

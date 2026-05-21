@@ -10,6 +10,9 @@ pub mod agent;
 pub mod session;
 pub mod speculation;
 
+#[cfg(feature = "live")]
+pub mod live;
+
 pub use agent::MosaicAgent;
 pub use session::Session;
 pub use speculation::Speculation;
