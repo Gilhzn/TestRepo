@@ -49,7 +49,7 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
   concurrent random edits converge byte-identically (16 rounds × 25
   ops per peer).
 
-## 🔨 M4 — Real-time collaboration
+## ✅ M4 — Real-time collaboration
 - ✅ HTTP sync server (`mosaic-serve` binary)
 - ✅ REST API: /health, /branches, /branches/:name, /missing, /bundle
 - ✅ Branch-aware bundles: branch_advances ride along with push
@@ -65,7 +65,10 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
   hello/leave notifications
 - ✅ History cap / compaction: per-room update log drops oldest entries
   past `DEFAULT_HISTORY_CAP` (10k), runtime-tunable via `set_history_cap`
-- ⬜ WebRTC P2P fallback (server-optional path)
+- ✅ **WebRTC signaling channel** (`/ws/signal/:name`): peers exchange
+  SDP offers / answers / ICE candidates with server-tagged `from` and
+  optional `to` for directed routing; broadcast fallback; hello carries
+  the room roster so a peer can target the others immediately
 
 ## 🔨 M5 — Semantic merge
 - ✅ tree-sitter integration (Rust, Python, TypeScript)
@@ -118,4 +121,4 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 
 ---
 
-## Current test count: **188 Rust + 6 TypeScript + 6 Python = 200 / 200 passing**
+## Current test count: **192 Rust + 6 TypeScript + 6 Python = 204 / 204 passing**

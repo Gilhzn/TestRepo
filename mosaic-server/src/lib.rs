@@ -36,6 +36,7 @@ use tokio::sync::Mutex;
 
 pub mod auth;
 pub mod awareness;
+pub mod signaling;
 pub mod ws;
 
 pub struct AppState {
@@ -44,6 +45,7 @@ pub struct AppState {
     policy: auth::Policy,
     pub live: Arc<ws::LiveState>,
     pub presence: Arc<awareness::PresenceState>,
+    pub signaling: Arc<signaling::SignalingState>,
 }
 
 impl AppState {
@@ -56,6 +58,7 @@ impl AppState {
             policy,
             live: Arc::new(ws::LiveState::new()),
             presence: Arc::new(awareness::PresenceState::new()),
+            signaling: Arc::new(signaling::SignalingState::new()),
         }
     }
 
@@ -66,6 +69,7 @@ impl AppState {
             policy,
             live: Arc::new(ws::LiveState::new()),
             presence: Arc::new(awareness::PresenceState::new()),
+            signaling: Arc::new(signaling::SignalingState::new()),
         }
     }
 
@@ -93,6 +97,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/live-stats", get(live_stats))
         .route("/ws/doc/:name", get(ws::ws_handler))
         .route("/ws/awareness/:name", get(awareness::awareness_handler))
+        .route("/ws/signal/:name", get(signaling::signaling_handler))
         .route("/changes/:id", get(change_detail_html))
         .with_state(state)
 }
@@ -907,6 +912,175 @@ mod tests {
         assert!(body.nodes[1].depth >= body.nodes[0].depth);
 
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn signaling_routes_directed_messages_and_broadcasts_otherwise() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        let dir = TempDir::new().unwrap();
+        let _ = Repository::init(dir.path()).unwrap();
+        let (addr, handle) =
+            serve(dir.path(), "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let url = format!("ws://{addr}/ws/signal/call-1");
+
+        let (mut alice, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let alice_hello: serde_json::Value = serde_json::from_str(
+            match alice.next().await.unwrap().unwrap() {
+                WsMsg::Text(t) => t,
+                other => panic!("expected text hello, got {other:?}"),
+            }
+            .as_str(),
+        )
+        .unwrap();
+        let alice_id = alice_hello["peer"].as_u64().unwrap();
+
+        let (mut bob, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let bob_hello: serde_json::Value = serde_json::from_str(
+            match bob.next().await.unwrap().unwrap() {
+                WsMsg::Text(t) => t,
+                other => panic!("expected text hello, got {other:?}"),
+            }
+            .as_str(),
+        )
+        .unwrap();
+        let bob_id = bob_hello["peer"].as_u64().unwrap();
+
+        // Alice received a join notification for Bob.
+        let join_for_alice: serde_json::Value = serde_json::from_str(
+            match alice.next().await.unwrap().unwrap() {
+                WsMsg::Text(t) => t,
+                other => panic!("expected text, got {other:?}"),
+            }
+            .as_str(),
+        )
+        .unwrap();
+        assert_eq!(join_for_alice["type"], "join");
+        assert_eq!(join_for_alice["peer"], bob_id);
+
+        let (mut carol, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let carol_hello: serde_json::Value = serde_json::from_str(
+            match carol.next().await.unwrap().unwrap() {
+                WsMsg::Text(t) => t,
+                other => panic!("expected text hello, got {other:?}"),
+            }
+            .as_str(),
+        )
+        .unwrap();
+        let carol_id = carol_hello["peer"].as_u64().unwrap();
+        // Drain alice + bob's "carol joined" messages.
+        let _ = alice.next().await;
+        let _ = bob.next().await;
+
+        // Alice sends an offer DIRECTED at Bob; Carol must NOT receive it.
+        let offer = serde_json::json!({
+            "type": "offer",
+            "to": bob_id,
+            "sdp": "v=0...",
+        })
+        .to_string();
+        alice.send(WsMsg::Text(offer)).await.unwrap();
+
+        let bob_msg: serde_json::Value = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async {
+                loop {
+                    match bob.next().await.unwrap().unwrap() {
+                        WsMsg::Text(t) => {
+                            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                            if v["type"] == "offer" {
+                                return v;
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(bob_msg["from"].as_u64().unwrap(), alice_id);
+        assert_eq!(bob_msg["sdp"], "v=0...");
+
+        // Carol should NOT see the directed message in 200ms.
+        let carol_got = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            carol.next(),
+        )
+        .await;
+        assert!(
+            carol_got.is_err(),
+            "carol received a message that was directed only at bob"
+        );
+
+        // Now alice sends a BROADCAST (no "to" field). Both bob and carol
+        // see it; alice does NOT see her own message back.
+        let bcast = serde_json::json!({
+            "type": "ice-candidate",
+            "candidate": "anyone listening?",
+        })
+        .to_string();
+        alice.send(WsMsg::Text(bcast)).await.unwrap();
+
+        let bob_bcast = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async {
+                loop {
+                    match bob.next().await.unwrap().unwrap() {
+                        WsMsg::Text(t) => {
+                            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                            if v["type"] == "ice-candidate" {
+                                return v;
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(bob_bcast["from"].as_u64().unwrap(), alice_id);
+
+        let carol_bcast = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async {
+                loop {
+                    match carol.next().await.unwrap().unwrap() {
+                        WsMsg::Text(t) => {
+                            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                            if v["type"] == "ice-candidate" {
+                                return v;
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(carol_bcast["from"].as_u64().unwrap(), alice_id);
+
+        // Alice should not loop her own broadcast back.
+        let alice_loop = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            alice.next(),
+        )
+        .await;
+        assert!(
+            alice_loop.is_err(),
+            "alice's broadcast looped back to herself"
+        );
+
+        let _ = alice.close(None).await;
+        let _ = bob.close(None).await;
+        let _ = carol.close(None).await;
+        handle.abort();
+
+        // Reference unused locals to silence warnings.
+        let _ = carol_id;
     }
 
     #[tokio::test]
