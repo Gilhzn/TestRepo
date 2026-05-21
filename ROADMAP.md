@@ -24,14 +24,15 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ✅ CLI: init, id, commit, log, branch, stats, put, cat, demo
 - ✅ Tests: 67
 
-## 🔨 M2 — Sync + Git interop
+## ✅ M2 — Sync + Git interop
 - ✅ Bundle format: serialize a set of changes + their CAS blobs
 - ✅ Bundle apply: import bundle into another repo, verify sigs, register DAG
 - ✅ Frontier diff: compute "changes you have, I don't" given two frontiers
 - ✅ CLI: `mos bundle create/apply/inspect`, two-repo sync demo
-- 🔨 Git import bridge (read-only): walk git history, emit Mosaic changes
+- ✅ Git import bridge (read-only): walk git history, emit Mosaic changes
+- ✅ Tests: 10
 
-## ⬜ M3 — CRDT integration
+## 🔨 M3 — CRDT integration
 - ⬜ yrs working-copy CRDT doc per text file
 - ⬜ Yjs ops ↔ patch compiler (with equivalence proof)
 - ⬜ LSP server (`mosaic-lsp`)
@@ -64,4 +65,4 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 
 ---
 
-## Current test count: **86 / 86 passing**
+## Current test count: **89 / 89 passing**

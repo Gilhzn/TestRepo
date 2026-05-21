@@ -55,8 +55,17 @@ enum Cmd {
     /// Bundle changes for transport to another repo.
     #[command(subcommand)]
     Bundle(BundleCmd),
+    /// Import history from another VCS.
+    #[command(subcommand)]
+    Import(ImportCmd),
     /// Run an end-to-end demo of two agents editing in parallel and merging cleanly.
     Demo,
+}
+
+#[derive(Subcommand)]
+enum ImportCmd {
+    /// Import a Git repository's history.
+    Git { path: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -116,6 +125,7 @@ fn main() -> ExitCode {
         }
         Cmd::Bundle(BundleCmd::Apply { path }) => run(|| bundle_apply(&path)),
         Cmd::Bundle(BundleCmd::Inspect { path }) => run(|| bundle_inspect(&path)),
+        Cmd::Import(ImportCmd::Git { path }) => run(|| import_git_cmd(&path)),
         Cmd::Demo => run(demo),
     }
 }
@@ -326,6 +336,25 @@ fn bundle_apply(path: &PathBuf) -> Result<(), AppError> {
     );
     for id in &report.applied {
         println!("  + {}", &id.to_hex()[..16]);
+    }
+    Ok(())
+}
+
+fn import_git_cmd(path: &PathBuf) -> Result<(), AppError> {
+    let mut repo = open_here()?;
+    let (importer, key) = repo.load_identity()?;
+    println!("importing git history from {}...", path.display());
+    let report = mosaic_core::import_git::import_git(&mut repo, path, &importer, &key)?;
+    println!(
+        "imported {} change(s), skipped {}",
+        report.imported.len(),
+        report.skipped.len()
+    );
+    for (sha, mosaic_id) in report.imported.iter().take(20) {
+        println!("  git {} -> mosaic {}", &sha[..12], &mosaic_id.to_hex()[..16]);
+    }
+    if report.imported.len() > 20 {
+        println!("  ... and {} more", report.imported.len() - 20);
     }
     Ok(())
 }

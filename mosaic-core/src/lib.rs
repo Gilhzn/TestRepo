@@ -6,6 +6,7 @@
 pub mod chunker;
 pub mod error;
 pub mod hash;
+pub mod import_git;
 pub mod m1;
 pub mod m1_dag;
 pub mod m1_patch;
