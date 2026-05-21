@@ -159,6 +159,28 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Move a branch back to the parent(s) of its current tip.
+    /// (The tip change stays in the DAG and can be recovered.)
+    Undo {
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
+    /// Delete a branch ref. Commits stay in the DAG until `mos gc`.
+    Abandon { branch: String },
+    /// Replace the branch tip with a new change that has the same parents
+    /// but uses the currently-staged files + a new intent.
+    Amend {
+        #[arg(short, long)]
+        intent: Option<String>,
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
+    /// Squash the current tip into its parent: a new change with the
+    /// grandparents as deps and the combined file set.
+    Squash {
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -285,6 +307,10 @@ fn main() -> ExitCode {
         Cmd::Unstage { paths } => run(|| unstage_cmd(&paths)),
         Cmd::Restore { path, branch } => run(|| restore_cmd(&path, &branch)),
         Cmd::Gc { dry_run } => run(|| gc_cmd(dry_run)),
+        Cmd::Undo { branch } => run(|| undo_cmd(&branch)),
+        Cmd::Abandon { branch } => run(|| abandon_cmd(&branch)),
+        Cmd::Amend { intent, branch } => run(|| amend_cmd(intent.as_deref(), &branch)),
+        Cmd::Squash { branch } => run(|| squash_cmd(&branch)),
     }
 }
 
@@ -1284,6 +1310,165 @@ fn restore_cmd(path: &str, branch: &str) -> Result<(), AppError> {
     } else {
         println!("nothing to restore for {path} (not in branch tip)");
     }
+    Ok(())
+}
+
+fn current_tip(repo: &Repository, branch: &str) -> Result<Option<ChangeId>, AppError> {
+    let frontier = repo.refs().get(branch).unwrap_or_default();
+    if frontier.0.is_empty() {
+        return Ok(None);
+    }
+    // Pick the most recent tip via topological order over the frontier.
+    let mut set = std::collections::BTreeSet::new();
+    for h in &frontier.0 {
+        set.insert(*h);
+    }
+    let ordered = repo.topo_order(&set);
+    Ok(ordered.last().map(|h| ChangeId(*h)))
+}
+
+fn undo_cmd(branch: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let tip = current_tip(&repo, branch)?
+        .ok_or_else(|| AppError::Msg(format!("branch {branch} has no tip to undo")))?;
+    let change = repo.load_change(&tip)?;
+    let new_frontier = if change.deps.is_empty() {
+        // Tip is a root commit — undo means: empty branch.
+        mosaic_core::m1_dag::refs::Frontier::default()
+    } else {
+        let mut f = mosaic_core::m1_dag::refs::Frontier::default();
+        for d in &change.deps {
+            f.0.insert(d.0);
+        }
+        f
+    };
+    repo.refs().put(branch, &new_frontier)?;
+    println!(
+        "undone: branch {branch} moved back to {} parent(s)",
+        new_frontier.0.len()
+    );
+    println!("  (the change {} is still in the DAG; `mos gc` will prune if unreferenced)", &tip.to_hex()[..12]);
+    Ok(())
+}
+
+fn abandon_cmd(branch: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    repo.refs().delete(branch)?;
+    println!("abandoned branch {branch}");
+    println!("  (its commits stay in the DAG; `mos gc` will prune if unreachable)");
+    Ok(())
+}
+
+fn amend_cmd(new_intent: Option<&str>, branch: &str) -> Result<(), AppError> {
+    use mosaic_core::working_copy::{StagedIndex, WorkingCopy};
+    let root = std::env::current_dir()?;
+    let mut repo = Repository::open(&root)?;
+    let tip = current_tip(&repo, branch)?
+        .ok_or_else(|| AppError::Msg(format!("branch {branch} has no tip to amend")))?;
+    let old = repo.load_change(&tip)?;
+
+    let (identity, key) = repo.load_identity()?;
+    let intent = new_intent
+        .map(str::to_string)
+        .or(old.intent.clone())
+        .unwrap_or_else(|| "(amended)".into());
+
+    let mut builder = ChangeBuilder::new(identity, key).intent(intent);
+    for d in &old.deps {
+        builder = builder.dep(*d);
+    }
+
+    // If anything is staged, use those files; otherwise reuse the tip's body.
+    let wc = WorkingCopy::open(&repo, &root);
+    let index = StagedIndex::load(&root)?;
+    let body: Vec<FileChange> = if !index.paths.is_empty() {
+        wc.build_staged_file_changes(&index)?
+    } else {
+        old.body.clone()
+    };
+    for fc in body {
+        builder = builder.file(fc);
+    }
+
+    let new_change = builder.build()?;
+    let new_id = repo.commit(new_change)?;
+
+    // Replace the branch's tip: drop the old tip, insert the new one.
+    let mut frontier = repo.refs().get(branch).unwrap_or_default();
+    frontier.0.remove(&tip.0);
+    frontier.0.insert(new_id.0);
+    repo.refs().put(branch, &frontier)?;
+
+    // Clear staged index if we consumed it.
+    let mut idx = mosaic_core::working_copy::StagedIndex::load(&root)?;
+    idx.clear();
+    idx.save(&root)?;
+
+    println!(
+        "amended {} -> {} on {branch}",
+        &tip.to_hex()[..12],
+        &new_id.to_hex()[..12]
+    );
+    Ok(())
+}
+
+fn squash_cmd(branch: &str) -> Result<(), AppError> {
+    let mut repo = open_here()?;
+    let tip = current_tip(&repo, branch)?
+        .ok_or_else(|| AppError::Msg(format!("branch {branch} has no tip to squash")))?;
+    let child = repo.load_change(&tip)?;
+    if child.deps.is_empty() {
+        return Err(AppError::Msg("nothing to squash: tip has no parent".into()));
+    }
+    if child.deps.len() != 1 {
+        return Err(AppError::Msg(
+            "squash only supported on a tip with a single parent (linear history)".into(),
+        ));
+    }
+    let parent_id = child.deps[0];
+    let parent = repo.load_change(&parent_id)?;
+
+    let (identity, key) = repo.load_identity()?;
+    let intent = match (&parent.intent, &child.intent) {
+        (Some(p), Some(c)) => format!("{p} + {c}"),
+        (Some(s), None) | (None, Some(s)) => s.clone(),
+        _ => "(squashed)".into(),
+    };
+
+    // Merge file sets: later (child) wins on path collisions.
+    let mut by_path: std::collections::BTreeMap<String, FileChange> =
+        parent
+            .body
+            .iter()
+            .cloned()
+            .map(|fc| (fc.path.clone(), fc))
+            .collect();
+    for fc in child.body {
+        by_path.insert(fc.path.clone(), fc);
+    }
+
+    let mut builder = ChangeBuilder::new(identity, key).intent(intent);
+    for d in &parent.deps {
+        builder = builder.dep(*d);
+    }
+    for fc in by_path.into_values() {
+        builder = builder.file(fc);
+    }
+    let new_change = builder.build()?;
+    let new_id = repo.commit(new_change)?;
+
+    let mut frontier = repo.refs().get(branch).unwrap_or_default();
+    frontier.0.remove(&tip.0);
+    frontier.0.remove(&parent_id.0);
+    frontier.0.insert(new_id.0);
+    repo.refs().put(branch, &frontier)?;
+
+    println!(
+        "squashed {} + {} -> {} on {branch}",
+        &parent_id.to_hex()[..12],
+        &tip.to_hex()[..12],
+        &new_id.to_hex()[..12]
+    );
     Ok(())
 }
 

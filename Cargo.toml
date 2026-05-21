@@ -7,6 +7,7 @@ members = [
     "mosaic-server",
     "mosaic-lsp",
     "mosaic-fuse",
+    "mosaic-mcp",
 ]
 
 [workspace.package]

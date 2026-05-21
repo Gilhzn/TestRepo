@@ -1116,6 +1116,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mosaic-mcp"
+version = "0.0.1"
+dependencies = [
+ "mosaic-core",
+ "mosaic-sdk",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "mosaic-sdk"
 version = "0.0.1"
 dependencies = [
