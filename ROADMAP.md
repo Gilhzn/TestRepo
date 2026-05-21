@@ -52,8 +52,10 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ✅ Rust SDK live client (`mosaic-sdk::live::LiveSession`) behind `live`
   feature flag
 - ✅ TypeScript SDK live client (`LiveSession.connect()`)
+- ✅ Awareness / presence channel (`/ws/awareness/:name`): server-assigned
+  peer ids (clients can't spoof), JSON envelopes with auto-injected peer,
+  hello/leave notifications
 - ⬜ WebRTC P2P fallback (server-optional path)
-- ⬜ Awareness / presence channel (cursor positions, selections)
 - ⬜ Server-side compaction of the update log
 
 ## 🔨 M5 — Semantic merge
@@ -73,7 +75,10 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ✅ Speculation: branch / promote / discard for trial-and-error work
 - ✅ attach_as_agent for agent-scoped identities inside human repos
 - ✅ TypeScript SDK (`mosaic-sdk-ts`): MosaicClient over HTTP, full types
-- ⬜ Agent identity attestation (Sigstore-style)
+- ✅ Agent attestation chain (`mosaic_core::attestation`): human's long-term
+  key signs an Attestation pinning a session pubkey to an Agent identity
+  with a validity window; verify() + authorize(Change) check the full chain
+- ⬜ Wire attestation enforcement into push pipeline (optional bundle field)
 
 ## 🔨 M7 — Scale + forge
 - ✅ Web UI: dashboard with stats / branches / change history
@@ -82,11 +87,13 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ✅ `GET /api/v1/changes/:id/diff` returns structured FileDiff JSON
 - ✅ Auth: per-key push allowlist; `mos trust add/list/remove/me` CLI;
   rejected push returns structured 403 with the offending key
+- ✅ Branch graph visualization: `/api/v1/graph` computes lane assignment
+  + depth via Kahn topo walk; SVG renderer in the dashboard with colored
+  lanes, branch badges, and clickable change hashes
 - ⬜ Virtual FS (FUSE on Linux/macOS, ProjectedFS on Windows)
 - ⬜ S3 / GCS backend for CAS offload
-- ⬜ Branch graph visualization
 - ⬜ Public beta
 
 ---
 
-## Current test count: **151 Rust + 6 TypeScript = 157 / 157 passing**
+## Current test count: **165 Rust + 6 TypeScript = 171 / 171 passing**

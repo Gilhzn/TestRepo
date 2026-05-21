@@ -17,6 +17,7 @@ pub mod repo;
 pub mod semantic;
 pub mod storage;
 pub mod sync;
+pub mod attestation;
 
 pub use error::Error;
 pub use hash::Hash;

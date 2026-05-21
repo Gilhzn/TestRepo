@@ -49,6 +49,30 @@ pub enum Error {
 
     #[error("line graph inconsistent: {0}")]
     LineGraphInconsistent(String),
+
+    #[error("attestation expired at {valid_until:?}, now {now:?}")]
+    AttestationExpired {
+        now: crate::m1::change::Tai64N,
+        valid_until: crate::m1::change::Tai64N,
+    },
+
+    #[error("attestation not yet valid until {valid_from:?}, now {now:?}")]
+    AttestationNotYetValid {
+        now: crate::m1::change::Tai64N,
+        valid_from: crate::m1::change::Tai64N,
+    },
+
+    #[error("attestation agent mismatch")]
+    AttestationAgentMismatch,
+
+    #[error("attestation key mismatch")]
+    AttestationKeyMismatch,
+
+    #[error("attestation requires Agent identity")]
+    AttestationInvalidAgent,
+
+    #[error("attestation invalid validity window")]
+    AttestationInvalidWindow,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

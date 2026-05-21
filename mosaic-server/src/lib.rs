@@ -35,6 +35,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub mod auth;
+pub mod awareness;
 pub mod ws;
 
 pub struct AppState {
@@ -42,6 +43,7 @@ pub struct AppState {
     lock: Mutex<()>,
     policy: auth::Policy,
     pub live: Arc<ws::LiveState>,
+    pub presence: Arc<awareness::PresenceState>,
 }
 
 impl AppState {
@@ -53,6 +55,7 @@ impl AppState {
             lock: Mutex::new(()),
             policy,
             live: Arc::new(ws::LiveState::new()),
+            presence: Arc::new(awareness::PresenceState::new()),
         }
     }
 
@@ -62,6 +65,7 @@ impl AppState {
             lock: Mutex::new(()),
             policy,
             live: Arc::new(ws::LiveState::new()),
+            presence: Arc::new(awareness::PresenceState::new()),
         }
     }
 
@@ -83,10 +87,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/changes", get(list_changes))
         .route("/api/v1/changes/:id", get(get_change))
         .route("/api/v1/changes/:id/diff", get(get_change_diff))
+        .route("/api/v1/graph", get(branch_graph))
         .route("/api/v1/missing", get(missing))
         .route("/api/v1/bundle", post(post_bundle))
         .route("/api/v1/live-stats", get(live_stats))
         .route("/ws/doc/:name", get(ws::ws_handler))
+        .route("/ws/awareness/:name", get(awareness::awareness_handler))
         .route("/changes/:id", get(change_detail_html))
         .with_state(state)
 }
@@ -179,7 +185,125 @@ async fn change_detail_html(Path(_id): Path<String>) -> impl IntoResponse {
 
 const CHANGE_HTML: &str = include_str!("change.html");
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub author: String,
+    pub intent: Option<String>,
+    pub deps: Vec<String>,
+    pub branches: Vec<String>,
+    pub lane: usize,
+    pub depth: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct BranchGraph {
+    pub nodes: Vec<GraphNode>,
+    pub lane_count: usize,
+}
+
+async fn branch_graph(State(s): State<Arc<AppState>>) -> Result<Json<BranchGraph>, AppError> {
+    let repo = s.open()?;
+    let all = repo.all_change_ids()?;
+    let ordered = repo.topo_order(&all);
+
+    let mut branch_tips: std::collections::HashMap<mosaic_core::Hash, Vec<String>> =
+        std::collections::HashMap::new();
+    for name in repo.refs().list()? {
+        let f = repo.refs().get(&name)?;
+        for tip in &f.0 {
+            branch_tips
+                .entry(*tip)
+                .or_default()
+                .push(name.clone());
+        }
+    }
+
+    // Compute depth (longest path from a root) per change.
+    let mut depth: std::collections::HashMap<mosaic_core::Hash, usize> =
+        std::collections::HashMap::new();
+    for h in &ordered {
+        let parents = repo.index().parents_of(h).unwrap_or(&[]);
+        let d = parents
+            .iter()
+            .map(|p| depth.get(p).copied().unwrap_or(0) + 1)
+            .max()
+            .unwrap_or(0);
+        depth.insert(*h, d);
+    }
+
+    // Lane assignment: greedy left-most fit.
+    // For each change in topo order, prefer the lane of its first parent if
+    // free at this row, else first free lane, else new lane.
+    let mut lanes: Vec<Option<mosaic_core::Hash>> = Vec::new();
+    let mut lane_of: std::collections::HashMap<mosaic_core::Hash, usize> =
+        std::collections::HashMap::new();
+    let mut nodes = Vec::new();
+
+    for h in &ordered {
+        let parents = repo.index().parents_of(h).unwrap_or(&[]).to_vec();
+        let preferred = parents.first().and_then(|p| lane_of.get(p).copied());
+        let lane = match preferred {
+            Some(l) => {
+                lanes[l] = Some(*h);
+                l
+            }
+            None => {
+                let free = lanes.iter().position(|s| s.is_none());
+                match free {
+                    Some(idx) => {
+                        lanes[idx] = Some(*h);
+                        idx
+                    }
+                    None => {
+                        lanes.push(Some(*h));
+                        lanes.len() - 1
+                    }
+                }
+            }
+        };
+        lane_of.insert(*h, lane);
+
+        // Free the lanes of parents that this is the *last* child of.
+        for p in &parents {
+            let p_lane = lane_of.get(p).copied();
+            let p_has_more_children = repo
+                .index()
+                .children_of(p)
+                .map(|cs| {
+                    cs.iter().any(|c| !lane_of.contains_key(c))
+                })
+                .unwrap_or(false);
+            if !p_has_more_children {
+                if let Some(pl) = p_lane {
+                    if pl != lane && lanes.get(pl).and_then(|s| *s) == Some(*p) {
+                        lanes[pl] = None;
+                    }
+                }
+            }
+        }
+
+        let change = repo.load_change(&ChangeId(*h))?;
+        let mut branches = branch_tips.get(h).cloned().unwrap_or_default();
+        branches.sort();
+        nodes.push(GraphNode {
+            id: h.to_hex(),
+            author: change.author.display(),
+            intent: change.intent,
+            deps: change.deps.iter().map(|d| d.to_hex()).collect(),
+            branches,
+            lane,
+            depth: depth.get(h).copied().unwrap_or(0),
+        });
+    }
+
+    Ok(Json(BranchGraph {
+        lane_count: lanes.len(),
+        nodes,
+    }))
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct LiveStats {
     pub open_docs: usize,
 }
@@ -721,6 +845,162 @@ mod tests {
         assert_eq!(resp[0].status, "added");
         assert!(resp[0].hunks.iter().all(|h| h.tag == "insert"));
 
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn graph_endpoint_returns_topologically_ordered_nodes() {
+        let dir = TempDir::new().unwrap();
+        let _ = Repository::init(dir.path()).unwrap();
+        let (idn, key) = human();
+        let (a, b, c) = {
+            let mut repo = Repository::open(dir.path()).unwrap();
+            let a = one_commit(&mut repo, &idn, &key, "a");
+            let b_change = ChangeBuilder::new(idn.clone(), key.clone())
+                .intent("b")
+                .dep(a)
+                .file(FileChange {
+                    path: "b.txt".into(),
+                    kind: FileKind::Text,
+                    patch: b"b".to_vec(),
+                    conflicts: Vec::new(),
+                })
+                .build()
+                .unwrap();
+            let b = repo.commit(b_change).unwrap();
+            repo.advance_branch("main", b).unwrap();
+            let c_change = ChangeBuilder::new(idn.clone(), key.clone())
+                .intent("c")
+                .dep(b)
+                .file(FileChange {
+                    path: "c.txt".into(),
+                    kind: FileKind::Text,
+                    patch: b"c".to_vec(),
+                    conflicts: Vec::new(),
+                })
+                .build()
+                .unwrap();
+            let c = repo.commit(c_change).unwrap();
+            repo.advance_branch("main", c).unwrap();
+            (a, b, c)
+        };
+
+        let (addr, handle) =
+            serve(dir.path(), "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let url = format!("http://{addr}/api/v1/graph");
+        let body: BranchGraph = reqwest::get(&url).await.unwrap().json().await.unwrap();
+
+        assert_eq!(body.nodes.len(), 3);
+        assert_eq!(body.nodes[0].id, a.to_hex());
+        assert_eq!(body.nodes[1].id, b.to_hex());
+        assert_eq!(body.nodes[2].id, c.to_hex());
+        assert!(body.lane_count >= 1);
+
+        // Tip should carry the "main" branch label.
+        assert!(body.nodes[2].branches.iter().any(|n| n == "main"));
+        // Root has no deps.
+        assert!(body.nodes[0].deps.is_empty());
+        // Middle node has a's hash as parent.
+        assert_eq!(body.nodes[1].deps, vec![a.to_hex()]);
+        // Depth grows along the chain.
+        assert!(body.nodes[2].depth >= body.nodes[1].depth);
+        assert!(body.nodes[1].depth >= body.nodes[0].depth);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn awareness_tags_messages_with_server_assigned_peer_id() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        let dir = TempDir::new().unwrap();
+        let _ = Repository::init(dir.path()).unwrap();
+        let (addr, handle) =
+            serve(dir.path(), "127.0.0.1:0".parse().unwrap()).await.unwrap();
+
+        let url = format!("ws://{addr}/ws/awareness/payments.rs");
+        let (mut alice, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let (mut bob, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        // Each peer should first receive its own "hello" with a server-assigned id.
+        let alice_hello: serde_json::Value = serde_json::from_str(
+            match alice.next().await.unwrap().unwrap() {
+                WsMsg::Text(t) => t,
+                other => panic!("expected text hello, got {other:?}"),
+            }
+            .as_str(),
+        )
+        .unwrap();
+        assert_eq!(alice_hello["type"], "hello");
+        let alice_peer_id = alice_hello["peer"].as_u64().unwrap();
+
+        let bob_hello: serde_json::Value = serde_json::from_str(
+            match bob.next().await.unwrap().unwrap() {
+                WsMsg::Text(t) => t,
+                other => panic!("expected text hello, got {other:?}"),
+            }
+            .as_str(),
+        )
+        .unwrap();
+        assert_eq!(bob_hello["type"], "hello");
+        let bob_peer_id = bob_hello["peer"].as_u64().unwrap();
+        assert_ne!(alice_peer_id, bob_peer_id);
+
+        // Alice sends a presence update; even if she lies about peer_id the
+        // server overwrites it with her authoritative id.
+        alice
+            .send(WsMsg::Text(
+                r#"{"type":"cursor","peer":999,"line":42,"col":7}"#.into(),
+            ))
+            .await
+            .unwrap();
+
+        let received = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async {
+                loop {
+                    match bob.next().await.unwrap().unwrap() {
+                        WsMsg::Text(t) => {
+                            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                            if v["type"] == "cursor" {
+                                return v;
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(received["peer"].as_u64().unwrap(), alice_peer_id);
+        assert_eq!(received["line"], 42);
+        assert_eq!(received["col"], 7);
+
+        // Closing Alice's connection should emit a leave message.
+        let _ = alice.close(None).await;
+        let leave = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            async {
+                loop {
+                    match bob.next().await.unwrap().unwrap() {
+                        WsMsg::Text(t) => {
+                            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                            if v["type"] == "leave" {
+                                return v;
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(leave["peer"].as_u64().unwrap(), alice_peer_id);
+
+        let _ = bob.close(None).await;
         handle.abort();
     }
 

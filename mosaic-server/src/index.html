@@ -141,6 +141,23 @@
     color: var(--muted);
     font-style: italic;
   }
+  .graph-scroll { overflow-x: auto; }
+  .graph-svg { display: block; }
+  .graph-row { font-size: 13px; color: var(--fg); white-space: nowrap; }
+  .graph-hash { font-family: ui-monospace, monospace; color: var(--accent); text-decoration: none; margin-right: 10px; }
+  .graph-hash:hover { text-decoration: underline; }
+  .graph-intent { color: var(--fg); margin-right: 8px; }
+  .branch-badge {
+    display: inline-block;
+    font-size: 11px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0 6px;
+    margin-right: 4px;
+    color: var(--muted);
+    line-height: 18px;
+  }
 </style>
 </head>
 <body>
@@ -158,6 +175,10 @@
     <div id="branches">Loading…</div>
   </section>
   <section>
+    <h2>Change graph</h2>
+    <div id="graph">Loading…</div>
+  </section>
+  <section>
     <h2>Recent changes</h2>
     <div id="changes">Loading…</div>
   </section>
@@ -165,6 +186,55 @@
 <footer>Served by mosaic-serve</footer>
 <script>
 function shortHash(s) { return s.slice(0, 12); }
+
+const LANE_COLORS = ["#4a5fbf", "#bf4a4a", "#4abf6c", "#bf8a4a", "#8a4abf", "#4a9fbf"];
+function laneColor(lane) { return LANE_COLORS[lane % LANE_COLORS.length]; }
+
+function renderGraph(graph) {
+  const el = document.getElementById("graph");
+  if (!graph.nodes.length) {
+    el.innerHTML = '<div class="empty">no changes yet</div>';
+    return;
+  }
+  const ROW_H = 30;
+  const LANE_W = 22;
+  const PADDING_LEFT = 14;
+  const NODE_R = 5;
+  const width = Math.max(120, graph.lane_count * LANE_W + PADDING_LEFT + 10);
+  const reversed = graph.nodes.slice().reverse();
+  const positions = new Map();
+  reversed.forEach((n, i) => positions.set(n.id, { x: PADDING_LEFT + n.lane * LANE_W, y: ROW_H / 2 + i * ROW_H }));
+  const height = reversed.length * ROW_H + 10;
+
+  const edges = [];
+  for (const n of reversed) {
+    const p = positions.get(n.id);
+    for (const dep of n.deps) {
+      const dp = positions.get(dep);
+      if (dp) {
+        edges.push(`<path d="M ${p.x} ${p.y} L ${p.x} ${(p.y + dp.y) / 2} L ${dp.x} ${(p.y + dp.y) / 2} L ${dp.x} ${dp.y}" stroke="${laneColor(n.lane)}" stroke-width="1.5" fill="none" />`);
+      }
+    }
+  }
+
+  const nodes = reversed.map((n, i) => {
+    const p = positions.get(n.id);
+    const intent = (n.intent || "(no intent)").replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    const branchBadges = n.branches.map(b => `<span class="branch-badge">${b.replace(/</g,'&lt;')}</span>`).join("");
+    return `
+      <circle cx="${p.x}" cy="${p.y}" r="${NODE_R}" fill="${laneColor(n.lane)}" stroke="var(--card)" stroke-width="2" />
+      <foreignObject x="${PADDING_LEFT + graph.lane_count * LANE_W}" y="${p.y - ROW_H/2}" width="${1000}" height="${ROW_H}">
+        <div xmlns="http://www.w3.org/1999/xhtml" class="graph-row" style="line-height:${ROW_H}px">
+          <a href="/changes/${n.id}" class="graph-hash">${shortHash(n.id)}</a>
+          <span class="graph-intent">${intent}</span>
+          ${branchBadges}
+        </div>
+      </foreignObject>
+    `;
+  }).join("");
+
+  el.innerHTML = `<div class="graph-scroll"><svg width="${width + 600}" height="${height}" class="graph-svg">${edges.join("")}${nodes}</svg></div>`;
+}
 function fmtTs(s) {
   if (!s) return "";
   const d = new Date(s * 1000);
@@ -189,6 +259,9 @@ async function load() {
           <div class="tips">${b.tips.map(shortHash).join(", ")}</div>
         </div>`).join("");
     }
+
+    const graph = await fetch("/api/v1/graph").then(r => r.json());
+    renderGraph(graph);
 
     const changes = await fetch("/api/v1/changes").then(r => r.json());
     const changesEl = document.getElementById("changes");
