@@ -7,6 +7,7 @@ pub mod chunker;
 pub mod error;
 pub mod hash;
 pub mod m1;
+pub mod m1_patch;
 pub mod storage;
 
 pub use error::Error;

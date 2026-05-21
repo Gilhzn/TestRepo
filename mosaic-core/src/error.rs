@@ -40,6 +40,15 @@ pub enum Error {
 
     #[error("invalid frontier line: {0}")]
     InvalidFrontierLine(String),
+
+    #[error("invalid patch: {0}")]
+    InvalidPatch(String),
+
+    #[error("patch target missing: {0}")]
+    PatchTargetMissing(String),
+
+    #[error("line graph inconsistent: {0}")]
+    LineGraphInconsistent(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
