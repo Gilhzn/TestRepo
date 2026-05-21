@@ -5,6 +5,7 @@ members = [
     "mosaic-cli",
     "mosaic-sdk",
     "mosaic-server",
+    "mosaic-lsp",
 ]
 
 [workspace.package]
@@ -35,6 +36,7 @@ tokio = { version = "1", features = ["full"] }
 axum = "0.7"
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "json"], default-features = false }
 serde_json = "1"
+tower-lsp = "0.20"
 
 [profile.release]
 lto = "thin"

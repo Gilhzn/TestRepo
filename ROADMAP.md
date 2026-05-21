@@ -36,8 +36,9 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ✅ yrs working-copy CRDT doc per text file (two-peer convergence)
 - ✅ Yjs state-vector based delta sync
 - ✅ Session compiler: before/after text → Mosaic Patch (line-graph)
+- ✅ LSP server (`mosaic-lsp`): document tracking + custom commands
+  (mosaic.commit/log/branches/status) + hover info
 - ⬜ Full equivalence proof: Yjs op-by-op → Pijul ops (research-grade)
-- ⬜ LSP server (`mosaic-lsp`)
 - ⬜ VS Code extension alpha
 
 ## 🔨 M4 — Real-time collaboration
@@ -80,4 +81,4 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 
 ---
 
-## Current test count: **133 / 133 passing**
+## Current test count: **136 / 136 passing**

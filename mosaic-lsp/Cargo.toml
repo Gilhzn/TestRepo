@@ -1,0 +1,27 @@
+[package]
+name = "mosaic-lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Language Server Protocol bridge for Mosaic VCS"
+
+[[bin]]
+name = "mosaic-lsp"
+path = "src/main.rs"
+
+[lib]
+name = "mosaic_lsp"
+path = "src/lib.rs"
+
+[dependencies]
+mosaic-core = { path = "../mosaic-core" }
+mosaic-sdk = { path = "../mosaic-sdk" }
+tower-lsp.workspace = true
+tokio.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
