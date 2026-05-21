@@ -25,6 +25,10 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 yrs = "0.18"
 similar = "2"
+tree-sitter = "0.22"
+tree-sitter-rust = "0.21"
+tree-sitter-python = "0.21"
+tree-sitter-typescript = "0.21"
 
 [profile.release]
 lto = "thin"

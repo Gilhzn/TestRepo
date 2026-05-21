@@ -46,10 +46,14 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ⬜ Awareness / presence channel
 - ⬜ Agent session protocol (session → atomic change stamp)
 
-## ⬜ M5 — Semantic merge
-- ⬜ tree-sitter integration (TypeScript, Python, Rust, Java grammars)
-- ⬜ GumTree algorithm implementation
-- ⬜ Three-strategy merge fallback chain (patch → CRDT → semantic)
+## 🔨 M5 — Semantic merge
+- ✅ tree-sitter integration (Rust, Python, TypeScript)
+- ✅ Content-addressable AST + body-only hashes
+- ✅ Definition extraction (functions, structs, classes, interfaces)
+- ✅ Rename detection via body-hash matching
+- ✅ Three-way semantic analysis with call-site hints
+- ⬜ Full GumTree algorithm (research-grade)
+- ⬜ Wire into merge engine as 3rd fallback strategy
 - ⬜ "Explain my merge" UI affordance
 
 ## ⬜ M6 — Agent SDK
@@ -67,4 +71,4 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 
 ---
 
-## Current test count: **96 / 96 passing**
+## Current test count: **112 / 112 passing**
