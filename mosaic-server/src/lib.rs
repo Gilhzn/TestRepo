@@ -93,7 +93,8 @@ impl AppState {
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/", get(index_html))
+        .route("/", get(landing_html))
+        .route("/dashboard", get(index_html))
         .route("/api/v1/health", get(health))
         .route("/api/v1/branches", get(list_branches))
         .route("/api/v1/branches/:name", get(get_branch))
@@ -395,6 +396,15 @@ async fn index_html() -> impl IntoResponse {
 }
 
 const INDEX_HTML: &str = include_str!("index.html");
+
+async fn landing_html() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        LANDING_HTML,
+    )
+}
+
+const LANDING_HTML: &str = include_str!("landing.html");
 
 #[derive(Serialize, Deserialize)]
 pub struct HealthResponse {

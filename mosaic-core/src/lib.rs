@@ -22,6 +22,7 @@ pub mod sync;
 pub mod attestation;
 pub mod working_copy;
 pub mod gc;
+pub mod audit;
 
 pub use error::Error;
 pub use hash::Hash;

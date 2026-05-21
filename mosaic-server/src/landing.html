@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mosaic — agent-native version control</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0a0a0c;
+    --bg-2: #15161a;
+    --fg: #ededee;
+    --muted: #9da0a8;
+    --accent: #8aa0e8;
+    --accent-2: #5a6fbf;
+    --border: #2a2c33;
+    --card: #15161a;
+    --code-bg: #0e1014;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #fafafa;
+      --bg-2: #fff;
+      --fg: #111;
+      --muted: #666;
+      --accent: #4a5fbf;
+      --accent-2: #3a4faf;
+      --border: #e2e2e2;
+      --card: #fff;
+      --code-bg: #f4f4f6;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+    margin: 0;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, monospace; }
+
+  /* Nav */
+  nav {
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-2);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  .nav-inner {
+    max-width: 1100px; margin: 0 auto;
+    padding: 14px 24px;
+    display: flex; align-items: center; gap: 32px;
+  }
+  .brand { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
+  .brand .dot { color: var(--accent); }
+  nav a { color: var(--muted); font-size: 14px; }
+  nav a.active { color: var(--fg); }
+  nav .spacer { flex: 1; }
+
+  /* Hero */
+  .hero {
+    max-width: 980px; margin: 0 auto;
+    padding: 96px 24px 56px;
+    text-align: center;
+  }
+  .hero h1 {
+    font-size: clamp(36px, 6vw, 64px);
+    font-weight: 700;
+    line-height: 1.05;
+    letter-spacing: -0.03em;
+    margin: 0 0 24px;
+  }
+  .hero h1 .grad {
+    background: linear-gradient(135deg, var(--accent), #a48ae8);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .hero p.sub {
+    font-size: 19px;
+    color: var(--muted);
+    max-width: 720px;
+    margin: 0 auto 36px;
+  }
+  .cta {
+    display: inline-flex; gap: 12px; flex-wrap: wrap; justify-content: center;
+  }
+  .btn {
+    display: inline-block;
+    padding: 11px 20px;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 14px;
+    border: 1px solid var(--border);
+    color: var(--fg);
+    background: var(--bg-2);
+    text-decoration: none;
+  }
+  .btn.primary {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #fff;
+    border-color: transparent;
+  }
+  .btn:hover { transform: translateY(-1px); transition: transform .15s; }
+
+  /* Sections */
+  section { padding: 64px 24px; }
+  .container { max-width: 1100px; margin: 0 auto; }
+  h2 { font-size: 28px; letter-spacing: -0.02em; margin: 0 0 32px; }
+  h3 { margin: 0 0 8px; font-size: 17px; }
+
+  /* Pillars grid */
+  .pillars { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px; }
+  .pillar {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 22px;
+  }
+  .pillar .icon {
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    margin-bottom: 14px;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 700;
+  }
+  .pillar p { color: var(--muted); font-size: 14px; margin: 6px 0 0; }
+
+  /* Quickstart */
+  pre.code {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--fg);
+  }
+  pre.code .c { color: var(--muted); }
+  pre.code .k { color: var(--accent); }
+
+  /* Numbers row */
+  .numbers {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 18px; text-align: center;
+  }
+  .num {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 22px 12px;
+  }
+  .num .big {
+    font-size: 36px; font-weight: 700; letter-spacing: -0.02em;
+    background: linear-gradient(135deg, var(--accent), #a48ae8);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .num .label { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+  /* Compare */
+  table.compare {
+    width: 100%; border-collapse: collapse; font-size: 14px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    overflow: hidden;
+  }
+  table.compare th, table.compare td {
+    padding: 12px 16px; text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  table.compare th { background: var(--bg-2); font-weight: 600; }
+  table.compare tr:last-child td { border-bottom: 0; }
+  table.compare .yes { color: #5dc77a; font-weight: 700; }
+  table.compare .no  { color: #c75d5d; }
+  table.compare .partial { color: #c7a45d; }
+
+  /* Footer */
+  footer {
+    text-align: center;
+    padding: 48px 24px 64px;
+    color: var(--muted);
+    font-size: 13px;
+    border-top: 1px solid var(--border);
+  }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<nav>
+  <div class="nav-inner">
+    <span class="brand">Mosaic<span class="dot">.</span></span>
+    <a href="#pillars">Why</a>
+    <a href="#quickstart">Start</a>
+    <a href="#compare">Compare</a>
+    <a href="/dashboard">Dashboard</a>
+    <span class="spacer"></span>
+    <a href="https://github.com/mosaic-vcs/mosaic" rel="noopener">Source</a>
+  </div>
+</nav>
+
+<header class="hero">
+  <h1>The VCS built for <span class="grad">AI agents</span>.</h1>
+  <p class="sub">
+    Git was designed for a small team of humans. Mosaic was designed from
+    scratch for a world where most commits come from AI agents working in
+    parallel, with humans in the loop. Mathematically clean parallel merges,
+    real-time co-editing, cryptographic agent identity, and an agent-native
+    SDK in Rust, TypeScript, and Python.
+  </p>
+  <div class="cta">
+    <a class="btn primary" href="#quickstart">Get started in 5 minutes</a>
+    <a class="btn" href="/dashboard">Open dashboard</a>
+  </div>
+</header>
+
+<section>
+  <div class="container">
+    <div class="numbers">
+      <div class="num"><div class="big">250+</div><div class="label">tests passing</div></div>
+      <div class="num"><div class="big">8</div><div class="label">milestones complete</div></div>
+      <div class="num"><div class="big">3</div><div class="label">SDK languages</div></div>
+      <div class="num"><div class="big">0</div><div class="label">wedged repos</div></div>
+    </div>
+  </div>
+</section>
+
+<section id="pillars">
+  <div class="container">
+    <h2>What makes Mosaic different</h2>
+    <div class="pillars">
+      <div class="pillar">
+        <div class="icon">∥</div>
+        <h3>Mathematically clean parallel merges</h3>
+        <p>Patches are commutative line-graph ops. Two changes that touch
+        disjoint regions merge identically in any order. The repo is
+        provably never wedged — leftover conflicts surface as structured
+        data, not <code>&lt;&lt;&lt;</code> markers.</p>
+      </div>
+      <div class="pillar">
+        <div class="icon">∞</div>
+        <h3>Real-time co-editing</h3>
+        <p>yrs-backed CRDT working copy. Two peers — humans, agents, or
+        a mix — edit the same file simultaneously and converge
+        byte-identical. WebSocket relay + WebRTC signaling included.</p>
+      </div>
+      <div class="pillar">
+        <div class="icon">⌥</div>
+        <h3>Agent identity that's actually verifiable</h3>
+        <p>Sigstore-style attestation chain: a human's long-term ed25519
+        key signs an attestation pinning an agent's session key to its
+        claimed identity + validity window. The server enforces it on
+        every push.</p>
+      </div>
+      <div class="pillar">
+        <div class="icon">⌘</div>
+        <h3>Semantic merge with renames</h3>
+        <p>tree-sitter understands Rust, Python, TypeScript. Mosaic
+        recognizes when one branch renamed a function and another edited
+        its body — and propagates the rename. <code>mos merge --explain</code>
+        prints the reasoning in plain English.</p>
+      </div>
+      <div class="pillar">
+        <div class="icon">⊞</div>
+        <h3>Multi-language SDK</h3>
+        <p>Rust (<code>mosaic-sdk</code>), TypeScript (<code>mosaic-sdk-ts</code>),
+        and Python (<code>mosaic-sdk-py</code>) — same wire protocol, same
+        identity model. Use Mosaic from any AI agent framework.</p>
+      </div>
+      <div class="pillar">
+        <div class="icon">⎙</div>
+        <h3>Virtual filesystem</h3>
+        <p>Mount any branch as a read-only filesystem with FUSE.
+        <code>ls</code>, <code>cat</code>, <code>ripgrep</code>, your editor — they all just work
+        against any historical state.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart">
+  <div class="container">
+    <h2>From zero to first commit in 5 minutes</h2>
+    <pre class="code"><span class="c"># 1. Create a repo and identity</span>
+<span class="k">mos</span> init
+<span class="k">mos</span> id setup --email you@your-company.com
+
+<span class="c"># 2. Work like in Git</span>
+echo "hello" &gt; greet.txt
+<span class="k">mos</span> add .
+<span class="k">mos</span> status
+<span class="k">mos</span> commit -i "first change"
+
+<span class="c"># 3. Open a sync server (on a shared box)</span>
+mosaic-serve --repo /var/repos/team --bind 0.0.0.0:7700
+
+<span class="c"># 4. From any teammate's machine</span>
+<span class="k">mos</span> remote add origin http://server:7700
+<span class="k">mos</span> trust me                         <span class="c"># share my pubkey with the admin</span>
+<span class="k">mos</span> push origin
+<span class="k">mos</span> pull origin
+
+<span class="c"># 5. Browse history in any tool</span>
+mosaic-mount --repo . --branch main /mnt/preview
+grep -r "TODO" /mnt/preview
+
+<span class="c"># 6. AI agents use the SDK</span>
+pip install mosaic-sdk
+python -c "from mosaic import MosaicClient; print(MosaicClient('http://server:7700').health())"
+</pre>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="container">
+    <h2>How it stacks up</h2>
+    <table class="compare">
+      <thead>
+        <tr><th>Capability</th><th>Git</th><th>jj</th><th>Mosaic</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Snapshot model</td><td class="yes">yes</td><td class="no">no (changes)</td><td class="no">no (commutative patches)</td></tr>
+        <tr><td>Conflict-as-data</td><td class="no">no</td><td class="yes">yes</td><td class="yes">yes</td></tr>
+        <tr><td>Real-time co-editing</td><td class="no">no</td><td class="no">no</td><td class="yes">yes (WebSocket + WebRTC)</td></tr>
+        <tr><td>Semantic merge with renames</td><td class="no">no</td><td class="no">no</td><td class="yes">yes (tree-sitter)</td></tr>
+        <tr><td>Cryptographic agent identity</td><td class="partial">commit-sigs</td><td class="partial">commit-sigs</td><td class="yes">attestation chain</td></tr>
+        <tr><td>Native MCP server</td><td class="no">no</td><td class="no">no</td><td class="yes">yes</td></tr>
+        <tr><td>Virtual filesystem</td><td class="partial">via EdenFS</td><td class="no">no</td><td class="yes">yes (FUSE)</td></tr>
+        <tr><td>S3-compatible storage</td><td class="partial">LFS</td><td class="no">no</td><td class="yes">yes</td></tr>
+        <tr><td>Per-session audit replay</td><td class="no">no</td><td class="no">no</td><td class="yes">yes</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer>
+  Mosaic · <a href="/dashboard">Dashboard</a> · <a href="/api/v1/health">Health</a> ·
+  built for the agent era
+</footer>
+</body>
+</html>

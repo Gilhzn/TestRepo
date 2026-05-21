@@ -135,4 +135,17 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
   `GET/POST /api/v1/changes/:id/{comments,approvals}` verify signatures
   and reject tampered payloads with 403.
 
-## Current test count: **212 Rust + 6 TypeScript + 6 Python = 224 / 224 passing**
+## Adoption + ecosystem layer (NEW)
+- ✅ MCP server (`mosaic-mcp`) — Claude Code & other AI agents drive Mosaic
+  natively via JSON-RPC tools over stdio (7-tool catalog)
+- ✅ Outgoing webhooks (`mosaic-server::webhooks`) — POST events to CI / chat /
+  deploy bots on push, optional HMAC signature
+- ✅ Audit log (`mosaic-core::audit`) — append-only, ed25519-signed,
+  per-session replay (`mos audit session <id>`), per-actor filter,
+  full chain query
+- ✅ Branch protection (`mosaic-server::protection`) — per-branch require_signed
+  / approvals / no-force-push, per-path allow/deny by author (glob)
+- ✅ Branch lifecycle (jj-style): `mos undo / abandon / amend / squash`
+- ✅ Marketing-grade landing page at `/`; dashboard moved to `/dashboard`
+
+## Current test count: **244 Rust + 6 TypeScript + 6 Python = 256 / 256 passing**

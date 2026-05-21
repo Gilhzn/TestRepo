@@ -181,6 +181,21 @@ enum Cmd {
         #[arg(short, long, default_value = "main")]
         branch: String,
     },
+    /// Audit log: query everything done by an actor or session.
+    #[command(subcommand)]
+    Audit(AuditCmd),
+}
+
+#[derive(Subcommand)]
+enum AuditCmd {
+    /// Replay every event in a given agent session id.
+    Session { session_id: String },
+    /// All events for one actor (by identity id, e.g. `human:alice@x.com`).
+    Actor { actor_id: String },
+    /// Distinct session ids seen so far.
+    Sessions,
+    /// Print all events ever logged (newest first).
+    All,
 }
 
 #[derive(Subcommand)]
@@ -311,6 +326,10 @@ fn main() -> ExitCode {
         Cmd::Abandon { branch } => run(|| abandon_cmd(&branch)),
         Cmd::Amend { intent, branch } => run(|| amend_cmd(intent.as_deref(), &branch)),
         Cmd::Squash { branch } => run(|| squash_cmd(&branch)),
+        Cmd::Audit(AuditCmd::Session { session_id }) => run(|| audit_session(&session_id)),
+        Cmd::Audit(AuditCmd::Actor { actor_id }) => run(|| audit_actor(&actor_id)),
+        Cmd::Audit(AuditCmd::Sessions) => run(audit_sessions),
+        Cmd::Audit(AuditCmd::All) => run(audit_all),
     }
 }
 
@@ -1469,6 +1488,66 @@ fn squash_cmd(branch: &str) -> Result<(), AppError> {
         &tip.to_hex()[..12],
         &new_id.to_hex()[..12]
     );
+    Ok(())
+}
+
+fn audit_session(session_id: &str) -> Result<(), AppError> {
+    let root = std::env::current_dir()?;
+    let log = mosaic_core::audit::AuditLog::open(&root)?;
+    let events = log.replay_session(session_id)?;
+    if events.is_empty() {
+        println!("(no events for session {session_id})");
+        return Ok(());
+    }
+    println!("Replay of session {session_id} — {} event(s):", events.len());
+    for (i, ev) in events.iter().enumerate() {
+        println!(
+            "  [{i}] {:?} by {} at {:?}",
+            ev.action,
+            ev.actor.display(),
+            ev.ts
+        );
+    }
+    Ok(())
+}
+
+fn audit_actor(actor_id: &str) -> Result<(), AppError> {
+    let root = std::env::current_dir()?;
+    let log = mosaic_core::audit::AuditLog::open(&root)?;
+    let events = log.by_actor(actor_id)?;
+    if events.is_empty() {
+        println!("(no events for actor {actor_id})");
+        return Ok(());
+    }
+    println!("Events for {actor_id} — {}:", events.len());
+    for ev in events {
+        println!(
+            "  {:?}  session={}",
+            ev.action,
+            ev.session_id.unwrap_or_else(|| "(none)".into())
+        );
+    }
+    Ok(())
+}
+
+fn audit_sessions() -> Result<(), AppError> {
+    let root = std::env::current_dir()?;
+    let log = mosaic_core::audit::AuditLog::open(&root)?;
+    let sessions = log.sessions()?;
+    if sessions.is_empty() {
+        println!("(no session-tagged events yet)");
+        return Ok(());
+    }
+    for s in sessions {
+        println!("{s}");
+    }
+    Ok(())
+}
+
+fn audit_all() -> Result<(), AppError> {
+    let root = std::env::current_dir()?;
+    let log = mosaic_core::audit::AuditLog::open(&root)?;
+    println!("{} total event(s)", log.count()?);
     Ok(())
 }
 
