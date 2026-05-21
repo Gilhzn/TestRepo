@@ -190,6 +190,13 @@ enum Cmd {
         #[arg(short, long, default_value = "main")]
         branch: String,
     },
+    /// Interactive first-time setup wizard.
+    Quickstart {
+        #[arg(long)]
+        email: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -337,6 +344,9 @@ fn main() -> ExitCode {
         Cmd::Audit(AuditCmd::Sessions) => run(audit_sessions),
         Cmd::Audit(AuditCmd::All) => run(audit_all),
         Cmd::ExportGit { target, branch } => run(|| export_git_cmd(&target, &branch)),
+        Cmd::Quickstart { email, name } => {
+            run(|| quickstart_cmd(email.as_deref(), name.as_deref()))
+        }
     }
 }
 
@@ -1495,6 +1505,93 @@ fn squash_cmd(branch: &str) -> Result<(), AppError> {
         &tip.to_hex()[..12],
         &new_id.to_hex()[..12]
     );
+    Ok(())
+}
+
+fn quickstart_cmd(email: Option<&str>, name: Option<&str>) -> Result<(), AppError> {
+    use std::path::Path;
+    println!("╭──────────────────────────────────────────────────────╮");
+    println!("│   Mosaic quickstart                                  │");
+    println!("│   The 5-step path from zero to your first commit.    │");
+    println!("╰──────────────────────────────────────────────────────╯");
+    println!();
+
+    let cwd = std::env::current_dir()?;
+    let already_init = cwd.join(".mosaic").exists();
+
+    if already_init {
+        println!("✓ step 1 (init): already a Mosaic repo at {}", cwd.display());
+    } else {
+        println!("→ step 1: initialising a fresh repo at {}", cwd.display());
+        init()?;
+    }
+    println!();
+
+    let repo = Repository::open(&cwd)?;
+    if repo.has_identity() {
+        let (id, _) = repo.load_identity()?;
+        println!("✓ step 2 (identity): already configured as {}", id.display());
+    } else {
+        let resolved_email = email.map(str::to_string).unwrap_or_else(|| {
+            std::env::var("EMAIL")
+                .or_else(|_| std::env::var("GIT_AUTHOR_EMAIL"))
+                .unwrap_or_else(|_| "you@example.com".to_string())
+        });
+        let resolved_name = name.map(str::to_string);
+        println!(
+            "→ step 2: setting up identity {} ({})",
+            resolved_name.as_deref().unwrap_or("(no display name)"),
+            resolved_email
+        );
+        id_setup(&resolved_email, resolved_name.as_deref())?;
+    }
+    println!();
+
+    let readme_path = "MOSAIC_QUICKSTART.md";
+    let placeholder = format!(
+        "# Welcome to Mosaic\n\n\
+         This file was created by `mos quickstart` to give you something to commit.\n\
+         Feel free to edit or delete it.\n\n\
+         - Run `mos status` to see your working-tree state.\n\
+         - Run `mos add .` then `mos commit -i \"...\"` to record a change.\n\
+         - Run `mos log` to see history; `mos branch list` to see branches.\n\
+         - Visit `http://localhost:7700/` (after `mosaic-serve --repo .`)\n  \
+           for the dashboard.\n"
+    );
+    if !Path::new(readme_path).exists() {
+        std::fs::write(readme_path, placeholder)?;
+        println!("→ step 3: wrote {readme_path} for you to commit");
+    } else {
+        println!("✓ step 3 ({readme_path}): already exists");
+    }
+    println!();
+
+    // Show status, then stage + commit + log if nothing committed yet.
+    println!("→ step 4: staging and committing");
+    let added = {
+        use mosaic_core::working_copy::{StagedIndex, WorkingCopy};
+        let repo = Repository::open(&cwd)?;
+        let wc = WorkingCopy::open(&repo, &cwd);
+        let mut index = StagedIndex::load(&cwd)?;
+        let n = wc.stage_all_modified("main", &mut index)?;
+        index.save(&cwd)?;
+        n
+    };
+    println!("  staged {added} file(s)");
+    if added > 0 {
+        commit("welcome to mosaic", &[], "main")?;
+    } else {
+        println!("  (nothing new to commit)");
+    }
+    println!();
+
+    println!("✓ step 5: you're all set. Next:");
+    println!("    mos status        # see modified files");
+    println!("    mos log           # see history");
+    println!("    mos demo          # see the parallel-merge thesis in action");
+    println!("    mosaic-serve --repo . --bind 127.0.0.1:7700");
+    println!("    # then open http://127.0.0.1:7700/ for the landing page,");
+    println!("    # http://127.0.0.1:7700/dashboard for stats + history.");
     Ok(())
 }
 
