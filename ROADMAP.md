@@ -148,4 +148,23 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ✅ Branch lifecycle (jj-style): `mos undo / abandon / amend / squash`
 - ✅ Marketing-grade landing page at `/`; dashboard moved to `/dashboard`
 
-## Current test count: **244 Rust + 6 TypeScript + 6 Python = 256 / 256 passing**
+## Migration + onboarding + proof (NEW)
+- ✅ Git export bridge (`mos export-git`) — one-way Mosaic → Git mirror,
+  closes the migration loop with `import git`
+- ✅ `mos quickstart` — 5-step first-run wizard (init → identity → first commit)
+- ✅ Benchmark harness (`cargo bench -p mosaic-core`) — reproducible
+  throughput numbers (see below)
+- ✅ Product-grade README + landing page
+
+## Benchmark snapshot (single-machine sample, release build)
+| Operation                                  | Throughput          |
+| ------------------------------------------ | ------------------- |
+| CAS get (4 KB blobs, verified)             | ~28,500 ops/s       |
+| CAS put (4 KB blobs, zstd)                 | ~6,700 ops/s        |
+| FastCDC chunk-and-store                    | ~780 MiB/s          |
+| three_way_merge (200-line file)            | ~30,700 merges/s    |
+| commit (chain)                             | ~3,000 changes/s    |
+| build_bundle                               | ~20,000 changes/s   |
+| apply_bundle (signatures verified)         | ~4,700 changes/s    |
+
+## Current test count: **247 Rust + 6 TypeScript + 6 Python = 259 / 259 passing**
