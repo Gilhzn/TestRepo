@@ -104,9 +104,12 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
   `HttpCas` for any S3-compatible / MinIO / R2 / plain-HTTP object
   store, optional bearer token, zstd + integrity verify. `TieredCas<L,R>`
   composer for write-through local + remote with cache-on-miss reads.
-- ⬜ Virtual FS (FUSE on Linux/macOS, ProjectedFS on Windows)
+- ✅ **Virtual FS via FUSE** (`mosaic-fuse` crate + `mosaic-mount` binary):
+  mounts the latest state of a branch as a read-only filesystem; lazy
+  lookup of files from CAS; standard ls/cat/find work end-to-end.
+  Verified live in the Linux container.
 - ⬜ Public beta
 
 ---
 
-## Current test count: **180 Rust + 6 TypeScript + 6 Python = 192 / 192 passing**
+## Current test count: **186 Rust + 6 TypeScript + 6 Python = 198 / 198 passing**

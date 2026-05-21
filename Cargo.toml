@@ -6,6 +6,7 @@ members = [
     "mosaic-sdk",
     "mosaic-server",
     "mosaic-lsp",
+    "mosaic-fuse",
 ]
 
 [workspace.package]
@@ -40,6 +41,8 @@ tower-lsp = "0.20"
 tokio-tungstenite = "0.23"
 futures-util = "0.3"
 base64 = "0.22"
+fuser = "0.14"
+libc = "0.2"
 
 [profile.release]
 lto = "thin"

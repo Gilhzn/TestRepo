@@ -1,0 +1,25 @@
+[package]
+name = "mosaic-fuse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Read-only FUSE filesystem exposing a Mosaic branch as a virtual working tree"
+
+[[bin]]
+name = "mosaic-mount"
+path = "src/main.rs"
+
+[lib]
+name = "mosaic_fuse"
+path = "src/lib.rs"
+
+[dependencies]
+mosaic-core = { path = "../mosaic-core" }
+fuser.workspace = true
+libc.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
