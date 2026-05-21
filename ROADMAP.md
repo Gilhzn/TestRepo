@@ -56,11 +56,13 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ⬜ Wire into merge engine as 3rd fallback strategy
 - ⬜ "Explain my merge" UI affordance
 
-## ⬜ M6 — Agent SDK
-- ⬜ Rust SDK (`mosaic-sdk`)
+## 🔨 M6 — Agent SDK
+- ✅ Rust SDK (`mosaic-sdk`)
+- ✅ Session API: begin/edit/abort/commit → atomic Change
+- ✅ Speculation: branch / promote / discard for trial-and-error work
+- ✅ attach_as_agent for agent-scoped identities inside human repos
 - ⬜ TypeScript SDK (`mosaic-sdk-ts`)
-- ⬜ Agent identity attestation
-- ⬜ Session API: begin/edit/end → atomic Change
+- ⬜ Agent identity attestation (Sigstore-style)
 
 ## ⬜ M7 — Scale + forge
 - ⬜ Virtual FS (FUSE on Linux/macOS, ProjectedFS on Windows)
@@ -71,4 +73,4 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 
 ---
 
-## Current test count: **112 / 112 passing**
+## Current test count: **124 / 124 passing**

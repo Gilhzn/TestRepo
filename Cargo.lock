@@ -559,6 +559,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mosaic-sdk"
+version = "0.0.1"
+dependencies = [
+ "mosaic-core",
+ "serde",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

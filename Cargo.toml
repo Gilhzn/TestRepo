@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "mosaic-core",
     "mosaic-cli",
+    "mosaic-sdk",
 ]
 
 [workspace.package]

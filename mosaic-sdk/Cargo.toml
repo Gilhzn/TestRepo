@@ -1,0 +1,15 @@
+[package]
+name = "mosaic-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Agent-native SDK for Mosaic VCS"
+
+[dependencies]
+mosaic-core = { path = "../mosaic-core" }
+thiserror.workspace = true
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true
