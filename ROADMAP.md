@@ -73,12 +73,13 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 
 ## 🔨 M7 — Scale + forge
 - ✅ Web UI: dashboard with stats / branches / change history (served by `mosaic-serve`)
+- ✅ Auth: per-key push allowlist; `mos trust add/list/remove/me` CLI;
+  rejected push returns structured 403 with the offending key
 - ⬜ Virtual FS (FUSE on Linux/macOS, ProjectedFS on Windows)
 - ⬜ S3 / GCS backend for CAS offload
 - ⬜ Web UI: review pages, branch graph, conflict resolution
-- ⬜ Permissions, ACLs, signed-push policies
 - ⬜ Public beta
 
 ---
 
-## Current test count: **136 Rust + 4 TypeScript = 140 / 140 passing**
+## Current test count: **143 Rust + 4 TypeScript = 147 / 147 passing**

@@ -34,21 +34,39 @@ use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+pub mod auth;
+
 pub struct AppState {
     repo_root: PathBuf,
     lock: Mutex<()>,
+    policy: auth::Policy,
 }
 
 impl AppState {
     pub fn new(repo_root: impl Into<PathBuf>) -> Self {
+        let repo_root = repo_root.into();
+        let policy = auth::Policy::load(&repo_root).unwrap_or_default();
+        Self {
+            repo_root,
+            lock: Mutex::new(()),
+            policy,
+        }
+    }
+
+    pub fn with_policy(repo_root: impl Into<PathBuf>, policy: auth::Policy) -> Self {
         Self {
             repo_root: repo_root.into(),
             lock: Mutex::new(()),
+            policy,
         }
     }
 
     fn open(&self) -> Result<Repository, Error> {
         Repository::open(&self.repo_root)
+    }
+
+    pub fn policy(&self) -> &auth::Policy {
+        &self.policy
     }
 }
 
@@ -216,6 +234,9 @@ async fn post_bundle(
     body: Bytes,
 ) -> Result<Json<ApplyResponse>, AppError> {
     let bundle = Bundle::decode(&body)?;
+    s.policy
+        .authorize_bundle(&bundle)
+        .map_err(AppError::Forbidden)?;
     let _guard = s.lock.lock().await;
     let mut repo = s.open()?;
     let report = apply_bundle(&mut repo, &bundle)?;
@@ -245,6 +266,8 @@ fn parse_have(s: &str) -> Result<Frontier, AppError> {
 pub enum AppError {
     #[error(transparent)]
     Core(#[from] Error),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
 }
 
 impl IntoResponse for AppError {
@@ -261,6 +284,7 @@ impl IntoResponse for AppError {
                 StatusCode::FORBIDDEN,
                 "signature verification failed".into(),
             ),
+            AppError::Forbidden(s) => (StatusCode::FORBIDDEN, s.clone()),
             other => (StatusCode::INTERNAL_SERVER_ERROR, format!("{other}")),
         };
         let body = serde_json::json!({ "error": msg });
@@ -403,6 +427,61 @@ mod tests {
         let bundle = Bundle::decode(&missing_bytes).unwrap();
         assert_eq!(bundle.changes.len(), 1);
         assert_eq!(bundle.changes[0].id(), local_id);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn allowlist_rejects_unknown_signer_over_http() {
+        let server_dir = TempDir::new().unwrap();
+        let _ = Repository::init(server_dir.path()).unwrap();
+        let trusted_key = SigningKey::generate();
+        let attacker_key = SigningKey::generate();
+
+        // Server policy: only the trusted key is allowed.
+        let policy = auth::Policy::allowlist([trusted_key.verifying_key().to_bytes()]);
+
+        // Build a bundle signed by the ATTACKER key (not on the allowlist).
+        let bundle = {
+            let bundle_dir = TempDir::new().unwrap();
+            let mut repo = Repository::init(bundle_dir.path()).unwrap();
+            let idn = Identity::human("attacker@example.com", None).unwrap();
+            let cid = one_commit(&mut repo, &idn, &attacker_key, "evil");
+            mosaic_core::sync::build_bundle(&repo, &[cid]).unwrap()
+        };
+
+        let state = Arc::new(AppState::with_policy(server_dir.path(), policy));
+        let app = router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let body = bundle.encode().unwrap();
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/api/v1/bundle"))
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Bundle signed by the trusted key goes through.
+        let trusted_bundle = {
+            let bundle_dir = TempDir::new().unwrap();
+            let mut repo = Repository::init(bundle_dir.path()).unwrap();
+            let idn = Identity::human("alice@example.com", None).unwrap();
+            let cid = one_commit(&mut repo, &idn, &trusted_key, "ok");
+            mosaic_core::sync::build_bundle(&repo, &[cid]).unwrap()
+        };
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/api/v1/bundle"))
+            .body(trusted_bundle.encode().unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
 
         handle.abort();
     }

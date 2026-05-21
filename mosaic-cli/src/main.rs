@@ -75,6 +75,9 @@ enum Cmd {
         #[arg(short, long, default_value = "main")]
         branch: String,
     },
+    /// Manage server-side trusted signing keys (allowlist).
+    #[command(subcommand)]
+    Trust(TrustCmd),
     /// Three-way merge a file across the patch + semantic layers.
     Merge {
         /// In-repo path (used to pick the language for semantic analysis).
@@ -96,6 +99,18 @@ enum Cmd {
 enum ImportCmd {
     /// Import a Git repository's history.
     Git { path: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum TrustCmd {
+    /// Append a hex-encoded ed25519 public key to the local allowlist.
+    Add { pubkey_hex: String },
+    /// Show currently trusted keys.
+    List,
+    /// Remove a key from the allowlist (no-op if missing).
+    Remove { pubkey_hex: String },
+    /// Print the current local identity's public key (for sharing).
+    Me,
 }
 
 #[derive(Subcommand)]
@@ -171,6 +186,10 @@ fn main() -> ExitCode {
         Cmd::Remote(RemoteCmd::List) => run(remote_list),
         Cmd::Push { remote, branch } => run(|| push_cmd(&remote, &branch)),
         Cmd::Pull { remote, branch } => run(|| pull_cmd(&remote, &branch)),
+        Cmd::Trust(TrustCmd::Add { pubkey_hex }) => run(|| trust_add(&pubkey_hex)),
+        Cmd::Trust(TrustCmd::List) => run(trust_list),
+        Cmd::Trust(TrustCmd::Remove { pubkey_hex }) => run(|| trust_remove(&pubkey_hex)),
+        Cmd::Trust(TrustCmd::Me) => run(trust_me),
         Cmd::Merge {
             path,
             base,
@@ -493,12 +512,20 @@ fn push_cmd(remote: &str, branch: &str) -> Result<(), AppError> {
         .send()
         .map_err(|e| AppError::Msg(format!("push: {e}")))?;
     let status = resp.status();
-    let report: mosaic_server::ApplyResponse = resp
-        .json()
+    let text = resp
+        .text()
         .map_err(|e| AppError::Msg(format!("push response: {e}")))?;
     if !status.is_success() {
-        return Err(AppError::Msg(format!("push failed: {status}")));
+        let server_msg = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+            .unwrap_or(text);
+        return Err(AppError::Msg(format!(
+            "push rejected by remote ({status}): {server_msg}"
+        )));
     }
+    let report: mosaic_server::ApplyResponse = serde_json::from_str(&text)
+        .map_err(|e| AppError::Msg(format!("push response parse: {e}")))?;
     println!(
         "pushed {} change(s) to {remote}/{branch} (skipped {})",
         report.applied.len(),
@@ -537,6 +564,99 @@ fn pull_cmd(remote: &str, branch: &str) -> Result<(), AppError> {
     for id in &report.applied {
         println!("  + {}", &id.to_hex()[..16]);
     }
+    Ok(())
+}
+
+fn trust_path() -> Result<PathBuf, AppError> {
+    Ok(std::env::current_dir()?
+        .join(".mosaic")
+        .join("allowed_signers.txt"))
+}
+
+fn load_trusted() -> Result<Vec<String>, AppError> {
+    let path = trust_path()?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    Ok(fs::read_to_string(&path)?
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect())
+}
+
+fn save_trusted(keys: &[String]) -> Result<(), AppError> {
+    let path = trust_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut body = String::from("# Mosaic allowed signers (ed25519 public keys, hex)\n");
+    for k in keys {
+        body.push_str(k);
+        body.push('\n');
+    }
+    fs::write(path, body)?;
+    Ok(())
+}
+
+fn validate_pubkey_hex(s: &str) -> Result<(), AppError> {
+    let bytes = hex::decode(s).map_err(|e| AppError::Msg(format!("invalid hex: {e}")))?;
+    if bytes.len() != 32 {
+        return Err(AppError::Msg(format!(
+            "expected 32-byte ed25519 pubkey, got {} bytes",
+            bytes.len()
+        )));
+    }
+    Ok(())
+}
+
+fn trust_add(pubkey_hex: &str) -> Result<(), AppError> {
+    validate_pubkey_hex(pubkey_hex)?;
+    let mut keys = load_trusted()?;
+    if keys.iter().any(|k| k == pubkey_hex) {
+        println!("(already trusted)");
+        return Ok(());
+    }
+    keys.push(pubkey_hex.to_string());
+    save_trusted(&keys)?;
+    println!("trusted {}", pubkey_hex);
+    Ok(())
+}
+
+fn trust_remove(pubkey_hex: &str) -> Result<(), AppError> {
+    let mut keys = load_trusted()?;
+    let before = keys.len();
+    keys.retain(|k| k != pubkey_hex);
+    if keys.len() == before {
+        println!("(not in allowlist)");
+    } else {
+        save_trusted(&keys)?;
+        println!("removed {}", pubkey_hex);
+    }
+    Ok(())
+}
+
+fn trust_list() -> Result<(), AppError> {
+    let keys = load_trusted()?;
+    if keys.is_empty() {
+        println!("(no trusted keys — server runs in open mode)");
+        return Ok(());
+    }
+    for k in keys {
+        println!("{k}");
+    }
+    Ok(())
+}
+
+fn trust_me() -> Result<(), AppError> {
+    let repo = open_here()?;
+    let (identity, key) = repo.load_identity()?;
+    let hex_key = hex::encode(key.verifying_key().to_bytes());
+    println!("identity: {}", identity.display());
+    println!("pubkey:   {}", hex_key);
+    println!();
+    println!("share this pubkey with the server admin who runs `mos trust add <pubkey>`");
     Ok(())
 }
 
