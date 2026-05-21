@@ -90,6 +90,9 @@ enum Cmd {
         theirs: PathBuf,
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Print a human-readable explanation of strategy + outcome.
+        #[arg(long)]
+        explain: bool,
     },
     /// Run an end-to-end demo of two agents editing in parallel and merging cleanly.
     Demo,
@@ -196,7 +199,8 @@ fn main() -> ExitCode {
             ours,
             theirs,
             out,
-        } => run(|| merge_cmd(&path, &base, &ours, &theirs, out.as_deref())),
+            explain,
+        } => run(|| merge_cmd(&path, &base, &ours, &theirs, out.as_deref(), explain)),
         Cmd::Demo => run(demo),
     }
 }
@@ -666,6 +670,7 @@ fn merge_cmd(
     ours: &PathBuf,
     theirs: &PathBuf,
     out: Option<&std::path::Path>,
+    explain: bool,
 ) -> Result<(), AppError> {
     let base_s = fs::read_to_string(base)?;
     let ours_s = fs::read_to_string(ours)?;
@@ -691,6 +696,12 @@ fn merge_cmd(
             print!("{merged}");
             println!("--- end ---");
         }
+    }
+
+    if explain {
+        println!();
+        print!("{}", result.explain());
+        return Ok(());
     }
 
     println!();

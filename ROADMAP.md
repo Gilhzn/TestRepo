@@ -57,8 +57,9 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ✅ Awareness / presence channel (`/ws/awareness/:name`): server-assigned
   peer ids (clients can't spoof), JSON envelopes with auto-injected peer,
   hello/leave notifications
+- ✅ History cap / compaction: per-room update log drops oldest entries
+  past `DEFAULT_HISTORY_CAP` (10k), runtime-tunable via `set_history_cap`
 - ⬜ WebRTC P2P fallback (server-optional path)
-- ⬜ Server-side compaction of the update log
 
 ## 🔨 M5 — Semantic merge
 - ✅ tree-sitter integration (Rust, Python, TypeScript)
@@ -68,8 +69,10 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ✅ Three-way semantic analysis with call-site hints
 - ✅ Wire into merge engine as 3rd fallback strategy (`merge_text_file`)
 - ✅ SDK exposure: `MosaicAgent::merge_file` / `analyze_three_way`
+- ✅ **"Explain my merge"**: `FileMerge::explain()` + `mos merge --explain`
+  produce human/AI-readable summary of strategy chain, outcome, renames,
+  semantic hints with file positions, and structured conflicts
 - ⬜ Full GumTree algorithm (research-grade)
-- ⬜ "Explain my merge" UI affordance
 
 ## ✅ M6 — Agent SDK
 - ✅ Rust SDK (`mosaic-sdk`)
@@ -106,4 +109,4 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 
 ---
 
-## Current test count: **176 Rust + 6 TypeScript + 6 Python = 188 / 188 passing**
+## Current test count: **180 Rust + 6 TypeScript + 6 Python = 192 / 192 passing**

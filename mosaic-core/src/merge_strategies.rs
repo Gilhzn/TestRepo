@@ -38,6 +38,128 @@ impl FileMerge {
     pub fn detected_a_rename(&self) -> bool {
         !self.renames.is_empty()
     }
+
+    /// Human-readable explanation of what the merge engine did and why.
+    /// Useful for `mos merge --explain` and for AI agents that want a
+    /// natural-language summary alongside the structured data.
+    pub fn explain(&self) -> String {
+        let mut s = String::new();
+        s.push_str("Mosaic merge summary\n");
+        s.push_str("====================\n\n");
+
+        // Strategy summary
+        s.push_str("Strategy chain:\n");
+        s.push_str("  1. patch commutation (line-graph) — applied\n");
+        s.push_str("  2. semantic AST analysis — ");
+        if self.semantic_hints.is_empty() {
+            s.push_str("(no hints emitted)\n");
+        } else {
+            s.push_str(&format!(
+                "{} hint(s) found\n",
+                self.semantic_hints.len()
+            ));
+        }
+        s.push('\n');
+
+        // Outcome
+        if self.is_clean() && self.semantic_hints.is_empty() {
+            s.push_str("Outcome: clean merge. Both sides combined without conflict.\n");
+        } else if self.is_clean() && !self.semantic_hints.is_empty() {
+            s.push_str(
+                "Outcome: clean text merge. Semantic hints below describe what \
+                 the engine learned about the change (for reviewers, agents, IDE).\n",
+            );
+        } else {
+            s.push_str(
+                "Outcome: merged graph is valid (acyclic, deterministic order) \
+                 but carries structured conflicts. The repository is NOT wedged — \
+                 these are data your agent or reviewer can resolve.\n",
+            );
+        }
+        s.push('\n');
+
+        // Renames
+        if !self.renames.is_empty() {
+            s.push_str("Renames detected:\n");
+            for (from, to) in &self.renames {
+                s.push_str(&format!("  • {from} → {to}\n"));
+            }
+            s.push('\n');
+        }
+
+        // Semantic hints
+        if !self.semantic_hints.is_empty() {
+            s.push_str("Semantic hints:\n");
+            for hint in &self.semantic_hints {
+                let line = match hint {
+                    SemanticHint::DefinitionRenamed { from, to, kind } => {
+                        format!("  • rename ({kind}): {from} → {to}")
+                    }
+                    SemanticHint::DefinitionEdited { name, kind } => {
+                        format!("  • edited ({kind}): {name}")
+                    }
+                    SemanticHint::DefinitionAdded { name, kind } => {
+                        format!("  • added ({kind}): {name}")
+                    }
+                    SemanticHint::DefinitionRemoved { name, kind } => {
+                        format!("  • removed ({kind}): {name}")
+                    }
+                    SemanticHint::CallSiteUsesOldName {
+                        old_name,
+                        new_name,
+                        line,
+                        column,
+                    } => format!(
+                        "  • callsite at {line}:{column} still uses old name \
+                         '{old_name}' (now '{new_name}') — \
+                         consider rewriting"
+                    ),
+                };
+                s.push_str(&line);
+                s.push('\n');
+            }
+            s.push('\n');
+        }
+
+        // Patch conflicts
+        if !self.patch_conflicts.is_empty() {
+            s.push_str("Patch-level conflicts (structured, repo still valid):\n");
+            for c in &self.patch_conflicts {
+                let line = match c {
+                    StructuredConflict::ConcurrentInsert {
+                        anchor,
+                        ours,
+                        theirs,
+                        ..
+                    } => format!(
+                        "  • concurrent insert at anchor {}: ours={}, theirs={} (both kept; \
+                         resolver picks one to kill)",
+                        short(&anchor.0),
+                        short(&ours.0),
+                        short(&theirs.0)
+                    ),
+                    StructuredConflict::EditVsDelete {
+                        target,
+                        deleter,
+                        editor,
+                    } => format!(
+                        "  • edit-vs-delete on {}: deleted by {deleter:?}, edited by {editor:?} \
+                         (dead anchor preserved, downstream patches stay valid)",
+                        short(&target.0)
+                    ),
+                };
+                s.push_str(&line);
+                s.push('\n');
+            }
+            s.push('\n');
+        }
+
+        s
+    }
+}
+
+fn short(h: &Hash) -> String {
+    h.to_hex()[..8].to_string()
 }
 
 pub fn merge_text_file(
@@ -173,6 +295,44 @@ mod tests {
         let creator = Hash::of(b"merge-3");
         let result = merge_text_file(&creator, None, base, ours, theirs).unwrap();
         assert!(result.semantic_hints.is_empty());
+    }
+
+    #[test]
+    fn explain_clean_merge_has_no_conflict_section() {
+        let creator = Hash::of(b"explain-1");
+        let result = merge_text_file(
+            &creator,
+            None,
+            "alpha\nbeta\n",
+            "alpha\nNEW_A\nbeta\n",
+            "alpha\nbeta\nNEW_B\n",
+        )
+        .unwrap();
+        let explanation = result.explain();
+        assert!(explanation.contains("Mosaic merge summary"));
+        assert!(explanation.contains("clean merge"));
+        assert!(!explanation.contains("Patch-level conflicts"));
+        assert!(!explanation.contains("Renames detected"));
+    }
+
+    #[test]
+    fn explain_rename_calls_out_the_rename_and_callsite() {
+        let creator = Hash::of(b"explain-2");
+        let result = merge_text_file(
+            &creator,
+            Some(Lang::Rust),
+            "fn chargeCard() {}\nfn other() { chargeCard(); }\n",
+            "fn processCharge() {}\nfn other() { chargeCard(); }\n",
+            "fn chargeCard() {}\nfn other() { chargeCard(); log(); }\n",
+        )
+        .unwrap();
+        let explanation = result.explain();
+        assert!(
+            explanation.contains("Renames detected"),
+            "expected renames section, got:\n{explanation}"
+        );
+        assert!(explanation.contains("chargeCard → processCharge"));
+        assert!(explanation.contains("callsite"));
     }
 
     #[test]

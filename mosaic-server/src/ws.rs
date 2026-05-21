@@ -26,9 +26,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 
+/// Cap on the per-room update log. When exceeded the oldest entries are
+/// dropped — new joiners see only the last N updates, which is fine for
+/// CRDT clients that already have most state out of band. Tune with
+/// `set_history_cap` per-room or leave at the conservative default.
+pub const DEFAULT_HISTORY_CAP: usize = 10_000;
+
 #[derive(Clone)]
 pub struct DocRoom {
     pub history: Arc<Mutex<Vec<Vec<u8>>>>,
+    pub history_cap: Arc<std::sync::atomic::AtomicUsize>,
     pub broadcast: broadcast::Sender<Vec<u8>>,
 }
 
@@ -37,8 +44,33 @@ impl DocRoom {
         let (tx, _rx) = broadcast::channel(1024);
         Self {
             history: Arc::new(Mutex::new(Vec::new())),
+            history_cap: Arc::new(std::sync::atomic::AtomicUsize::new(DEFAULT_HISTORY_CAP)),
             broadcast: tx,
         }
+    }
+
+    pub fn set_history_cap(&self, cap: usize) {
+        self.history_cap
+            .store(cap.max(1), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn history_cap(&self) -> usize {
+        self.history_cap.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Append an update, enforcing the cap by dropping the oldest entries.
+    pub async fn push_update(&self, update: Vec<u8>) {
+        let cap = self.history_cap();
+        let mut log = self.history.lock().await;
+        log.push(update);
+        if log.len() > cap {
+            let excess = log.len() - cap;
+            log.drain(0..excess);
+        }
+    }
+
+    pub async fn history_len(&self) -> usize {
+        self.history.lock().await.len()
     }
 }
 
@@ -114,10 +146,7 @@ async fn handle_socket(socket: WebSocket, name: String, live: Arc<LiveState>) {
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Binary(bytes) => {
-                {
-                    let mut log = room.history.lock().await;
-                    log.push(bytes.clone());
-                }
+                room.push_update(bytes.clone()).await;
                 let _ = room.broadcast.send(bytes);
             }
             Message::Text(_) => {
@@ -162,13 +191,30 @@ mod tests {
     async fn history_appends_in_order() {
         let live = LiveState::new();
         let room = live.room("file").await;
-        {
-            let mut log = room.history.lock().await;
-            log.push(vec![1]);
-            log.push(vec![2]);
-            log.push(vec![3]);
-        }
+        room.push_update(vec![1]).await;
+        room.push_update(vec![2]).await;
+        room.push_update(vec![3]).await;
         let log = room.history.lock().await;
         assert_eq!(*log, vec![vec![1], vec![2], vec![3]]);
+    }
+
+    #[tokio::test]
+    async fn history_cap_drops_oldest_entries() {
+        let live = LiveState::new();
+        let room = live.room("file").await;
+        room.set_history_cap(3);
+        for i in 0..10u8 {
+            room.push_update(vec![i]).await;
+        }
+        let log = room.history.lock().await;
+        // Last 3 only.
+        assert_eq!(*log, vec![vec![7u8], vec![8u8], vec![9u8]]);
+    }
+
+    #[tokio::test]
+    async fn default_history_cap_is_reasonable() {
+        let live = LiveState::new();
+        let room = live.room("any").await;
+        assert!(room.history_cap() >= 1_000);
     }
 }
