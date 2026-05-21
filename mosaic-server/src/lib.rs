@@ -54,13 +54,82 @@ impl AppState {
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/", get(index_html))
         .route("/api/v1/health", get(health))
         .route("/api/v1/branches", get(list_branches))
         .route("/api/v1/branches/:name", get(get_branch))
+        .route("/api/v1/changes", get(list_changes))
+        .route("/api/v1/changes/:id", get(get_change))
         .route("/api/v1/missing", get(missing))
         .route("/api/v1/bundle", post(post_bundle))
         .with_state(state)
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct ChangeSummary {
+    pub id: String,
+    pub author: String,
+    pub intent: Option<String>,
+    pub timestamp: u64,
+    pub deps: Vec<String>,
+    pub file_count: usize,
+}
+
+async fn list_changes(State(s): State<Arc<AppState>>) -> Result<Json<Vec<ChangeSummary>>, AppError> {
+    let repo = s.open()?;
+    let all = repo.all_change_ids()?;
+    let ordered = repo.topo_order(&all);
+    let mut out = Vec::new();
+    for h in ordered {
+        let change = repo.load_change(&ChangeId(h))?;
+        out.push(ChangeSummary {
+            id: h.to_hex(),
+            author: change.author.display(),
+            intent: change.intent,
+            timestamp: change.ts.0,
+            deps: change.deps.iter().map(|d| d.to_hex()).collect(),
+            file_count: change.body.len(),
+        });
+    }
+    Ok(Json(out))
+}
+
+async fn get_change(
+    State(s): State<Arc<AppState>>,
+    Path(id_hex): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let repo = s.open()?;
+    let h = mosaic_core::Hash::from_hex(&id_hex)?;
+    let change = repo.load_change(&ChangeId(h))?;
+    let files: Vec<serde_json::Value> = change
+        .body
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "path": f.path,
+                "kind": format!("{:?}", f.kind),
+                "size": f.patch.len(),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "id": id_hex,
+        "author": change.author.display(),
+        "intent": change.intent,
+        "timestamp": change.ts.0,
+        "deps": change.deps.iter().map(|d| d.to_hex()).collect::<Vec<_>>(),
+        "files": files,
+    })))
+}
+
+async fn index_html() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        INDEX_HTML,
+    )
+}
+
+const INDEX_HTML: &str = include_str!("index.html");
 
 #[derive(Serialize, Deserialize)]
 pub struct HealthResponse {
