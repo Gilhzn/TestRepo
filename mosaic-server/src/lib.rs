@@ -82,12 +82,102 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/branches/:name", get(get_branch))
         .route("/api/v1/changes", get(list_changes))
         .route("/api/v1/changes/:id", get(get_change))
+        .route("/api/v1/changes/:id/diff", get(get_change_diff))
         .route("/api/v1/missing", get(missing))
         .route("/api/v1/bundle", post(post_bundle))
         .route("/api/v1/live-stats", get(live_stats))
         .route("/ws/doc/:name", get(ws::ws_handler))
+        .route("/changes/:id", get(change_detail_html))
         .with_state(state)
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct FileDiff {
+    pub path: String,
+    pub kind: String,
+    pub status: String,
+    pub hunks: Vec<DiffHunk>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DiffHunk {
+    pub tag: String,
+    pub line: String,
+}
+
+async fn get_change_diff(
+    State(s): State<Arc<AppState>>,
+    Path(id_hex): Path<String>,
+) -> Result<Json<Vec<FileDiff>>, AppError> {
+    let repo = s.open()?;
+    let h = mosaic_core::Hash::from_hex(&id_hex)?;
+    let change = repo.load_change(&ChangeId(h))?;
+
+    let mut parent_files: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    for parent in &change.deps {
+        if let Ok(p_change) = repo.load_change(parent) {
+            for file in &p_change.body {
+                parent_files
+                    .entry(file.path.clone())
+                    .or_insert_with(|| file.patch.clone());
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for file in &change.body {
+        let before_bytes = parent_files.get(&file.path).cloned().unwrap_or_default();
+        let after_bytes = file.patch.clone();
+        let status = if before_bytes.is_empty() {
+            "added".to_string()
+        } else if after_bytes.is_empty() {
+            "removed".to_string()
+        } else if before_bytes == after_bytes {
+            "unchanged".to_string()
+        } else {
+            "modified".to_string()
+        };
+
+        let before = String::from_utf8_lossy(&before_bytes).into_owned();
+        let after = String::from_utf8_lossy(&after_bytes).into_owned();
+        let hunks = text_diff_hunks(&before, &after);
+
+        out.push(FileDiff {
+            path: file.path.clone(),
+            kind: format!("{:?}", file.kind),
+            status,
+            hunks,
+        });
+    }
+    Ok(Json(out))
+}
+
+fn text_diff_hunks(before: &str, after: &str) -> Vec<DiffHunk> {
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(before, after);
+    let mut out = Vec::new();
+    for change in diff.iter_all_changes() {
+        let tag = match change.tag() {
+            ChangeTag::Equal => "equal",
+            ChangeTag::Delete => "delete",
+            ChangeTag::Insert => "insert",
+        };
+        out.push(DiffHunk {
+            tag: tag.into(),
+            line: change.value().trim_end_matches('\n').to_string(),
+        });
+    }
+    out
+}
+
+async fn change_detail_html(Path(_id): Path<String>) -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        CHANGE_HTML,
+    )
+}
+
+const CHANGE_HTML: &str = include_str!("change.html");
 
 #[derive(Serialize)]
 pub struct LiveStats {
@@ -564,6 +654,73 @@ mod tests {
         let _ = alice.close(None).await;
         let _ = bob.close(None).await;
         let _ = carol.close(None).await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn diff_endpoint_marks_inserts_deletes_and_equals() {
+        let dir = TempDir::new().unwrap();
+        let _ = Repository::init(dir.path()).unwrap();
+        let (idn, key) = human();
+        let (first_id, second_id) = {
+            let mut repo = Repository::open(dir.path()).unwrap();
+            let first = ChangeBuilder::new(idn.clone(), key.clone())
+                .intent("initial")
+                .file(FileChange {
+                    path: "file.txt".into(),
+                    kind: FileKind::Text,
+                    patch: b"alpha\nbeta\ngamma\n".to_vec(),
+                    conflicts: Vec::new(),
+                })
+                .build()
+                .unwrap();
+            let first_id = repo.commit(first).unwrap();
+            repo.advance_branch("main", first_id).unwrap();
+
+            let second = ChangeBuilder::new(idn.clone(), key.clone())
+                .intent("edit")
+                .dep(first_id)
+                .file(FileChange {
+                    path: "file.txt".into(),
+                    kind: FileKind::Text,
+                    patch: b"alpha\nBETA\ngamma\ndelta\n".to_vec(),
+                    conflicts: Vec::new(),
+                })
+                .build()
+                .unwrap();
+            let second_id = repo.commit(second).unwrap();
+            repo.advance_branch("main", second_id).unwrap();
+            (first_id, second_id)
+        };
+
+        let (addr, handle) =
+            serve(dir.path(), "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let url = format!("http://{addr}/api/v1/changes/{}/diff", second_id.to_hex());
+        let resp: Vec<FileDiff> = reqwest::get(&url).await.unwrap().json().await.unwrap();
+        assert_eq!(resp.len(), 1);
+        let file = &resp[0];
+        assert_eq!(file.path, "file.txt");
+        assert_eq!(file.status, "modified");
+
+        let tags: Vec<&str> = file.hunks.iter().map(|h| h.tag.as_str()).collect();
+        assert!(tags.contains(&"delete"), "expected a delete hunk for beta");
+        assert!(tags.contains(&"insert"), "expected an insert hunk");
+
+        let insert_lines: Vec<&str> = file
+            .hunks
+            .iter()
+            .filter(|h| h.tag == "insert")
+            .map(|h| h.line.as_str())
+            .collect();
+        assert!(insert_lines.iter().any(|l| *l == "BETA"));
+        assert!(insert_lines.iter().any(|l| *l == "delta"));
+
+        // First change has no parents -> all lines marked "insert", status "added".
+        let url = format!("http://{addr}/api/v1/changes/{}/diff", first_id.to_hex());
+        let resp: Vec<FileDiff> = reqwest::get(&url).await.unwrap().json().await.unwrap();
+        assert_eq!(resp[0].status, "added");
+        assert!(resp[0].hunks.iter().all(|h| h.tag == "insert"));
+
         handle.abort();
     }
 

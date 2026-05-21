@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mosaic · change</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fafafa;
+    --fg: #111;
+    --muted: #666;
+    --accent: #4a5fbf;
+    --card: #fff;
+    --border: #e2e2e2;
+    --add-bg: #e6ffec;
+    --add-fg: #1b4332;
+    --del-bg: #ffeef0;
+    --del-fg: #67101a;
+    --eq-fg: #555;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1a1a;
+      --fg: #eee;
+      --muted: #999;
+      --accent: #8aa0e8;
+      --card: #232323;
+      --border: #333;
+      --add-bg: #0d2f1c;
+      --add-fg: #88e8a4;
+      --del-bg: #2f0d12;
+      --del-fg: #f08894;
+      --eq-fg: #999;
+    }
+  }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, sans-serif;
+    margin: 0;
+    padding: 0;
+  }
+  header {
+    padding: 20px 32px;
+    border-bottom: 1px solid var(--border);
+    background: var(--card);
+  }
+  header h1 { margin: 0; font-size: 18px; }
+  header .nav { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  header .nav a { color: var(--accent); text-decoration: none; }
+  main { padding: 20px 32px; max-width: 1100px; margin: 0 auto; }
+  section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 16px;
+  }
+  .meta { display: grid; grid-template-columns: 110px 1fr; gap: 6px 12px; font-size: 13px; }
+  .meta .k { color: var(--muted); }
+  .file {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 16px;
+    overflow: hidden;
+  }
+  .file-head {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: ui-monospace, monospace;
+    font-size: 13px;
+  }
+  .file-head .status {
+    padding: 1px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    background: var(--add-bg);
+    color: var(--add-fg);
+  }
+  .file-head .status.modified { background: #fff4cf; color: #5a4500; }
+  .file-head .status.removed { background: var(--del-bg); color: var(--del-fg); }
+  .file-head .status.unchanged { background: var(--bg); color: var(--muted); }
+  pre.diff {
+    margin: 0;
+    padding: 8px 0;
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 12.5px;
+    line-height: 1.45;
+    overflow-x: auto;
+  }
+  .diff-line { padding: 0 14px; white-space: pre; }
+  .diff-line.insert { background: var(--add-bg); color: var(--add-fg); }
+  .diff-line.insert::before { content: "+ "; opacity: 0.7; }
+  .diff-line.delete { background: var(--del-bg); color: var(--del-fg); }
+  .diff-line.delete::before { content: "- "; opacity: 0.7; }
+  .diff-line.equal { color: var(--eq-fg); }
+  .diff-line.equal::before { content: "  "; }
+  .empty { color: var(--muted); font-style: italic; padding: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">change · loading</h1>
+  <div class="nav"><a href="/">← back to dashboard</a></div>
+</header>
+<main>
+  <section><div id="meta" class="meta">loading…</div></section>
+  <div id="files"></div>
+</main>
+<script>
+function escape(s) {
+  return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+function shortHash(s) { return s.slice(0, 12); }
+
+async function load() {
+  const id = location.pathname.split("/").pop();
+  document.getElementById("title").textContent = "change " + shortHash(id);
+
+  const detailRes = await fetch("/api/v1/changes/" + encodeURIComponent(id));
+  if (!detailRes.ok) {
+    document.getElementById("meta").innerHTML = "<div class=empty>change not found</div>";
+    return;
+  }
+  const detail = await detailRes.json();
+  const ts = new Date(detail.timestamp * 1000).toISOString().replace("T", " ").slice(0, 19);
+  document.getElementById("meta").innerHTML = `
+    <div class=k>id</div><div><code>${id}</code></div>
+    <div class=k>author</div><div>${escape(detail.author)}</div>
+    <div class=k>intent</div><div>${escape(detail.intent || "(no intent)")}</div>
+    <div class=k>timestamp</div><div>${ts}</div>
+    <div class=k>parents</div><div>${(detail.deps && detail.deps.length) ? detail.deps.map(d => `<a href="/changes/${d}"><code>${shortHash(d)}</code></a>`).join(", ") : "(root)"}</div>
+    <div class=k>files</div><div>${detail.files.length}</div>
+  `;
+
+  const diffRes = await fetch("/api/v1/changes/" + encodeURIComponent(id) + "/diff");
+  const diffs = await diffRes.json();
+  const root = document.getElementById("files");
+  if (!diffs.length) {
+    root.innerHTML = '<div class=empty>no files in this change</div>';
+    return;
+  }
+  root.innerHTML = diffs.map(d => `
+    <div class="file">
+      <div class="file-head">
+        <span>${escape(d.path)}</span>
+        <span class="status ${d.status}">${d.status}</span>
+      </div>
+      <pre class="diff">${d.hunks.map(h => `<div class="diff-line ${h.tag}">${escape(h.line || "")}</div>`).join("")}</pre>
+    </div>`).join("");
+}
+load();
+</script>
+</body>
+</html>

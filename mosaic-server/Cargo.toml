@@ -25,6 +25,7 @@ hex.workspace = true
 clap.workspace = true
 base64.workspace = true
 futures-util.workspace = true
+similar.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

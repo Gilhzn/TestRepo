@@ -90,7 +90,10 @@
     display: grid;
     grid-template-columns: 130px 1fr;
     gap: 16px;
+    color: inherit;
+    text-decoration: none;
   }
+  .change:hover { background: var(--bg); }
   .change:first-of-type {
     border-top: 0;
   }
@@ -193,13 +196,13 @@ async function load() {
       changesEl.innerHTML = '<div class="empty">no changes yet</div>';
     } else {
       changesEl.innerHTML = changes.slice().reverse().map(c => `
-        <div class="change">
+        <a class="change" href="/changes/${c.id}">
           <div class="hash">${shortHash(c.id)}</div>
           <div class="body">
             <div class="intent">${(c.intent || "(no intent)").replace(/</g, "&lt;")}</div>
             <div class="meta">${c.author.replace(/</g, "&lt;")} · ${fmtTs(c.timestamp)} · ${c.file_count} file${c.file_count === 1 ? "" : "s"}</div>
           </div>
-        </div>`).join("");
+        </a>`).join("");
     }
   } catch (e) {
     document.body.insertAdjacentHTML("beforeend", `<pre style="color:red;padding:24px">${e.message}</pre>`);
