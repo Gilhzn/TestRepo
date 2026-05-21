@@ -38,6 +38,7 @@ use tokio::sync::Mutex;
 pub mod auth;
 pub mod awareness;
 pub mod signaling;
+pub mod webhooks;
 pub mod ws;
 
 pub struct AppState {
@@ -476,13 +477,27 @@ async fn post_bundle(
     s.policy
         .authorize_bundle(&bundle)
         .map_err(AppError::Forbidden)?;
+    let branch_advances = bundle.branch_advances.clone();
     let _guard = s.lock.lock().await;
     let mut repo = s.open()?;
     let report = apply_bundle(&mut repo, &bundle)?;
-    Ok(Json(ApplyResponse {
-        applied: report.applied.iter().map(ChangeId::to_hex).collect(),
-        skipped: report.skipped.iter().map(ChangeId::to_hex).collect(),
-    }))
+    let applied: Vec<String> = report.applied.iter().map(ChangeId::to_hex).collect();
+    let skipped: Vec<String> = report.skipped.iter().map(ChangeId::to_hex).collect();
+
+    // Fire webhooks for each branch_advance. Best-effort, non-blocking.
+    let webhook_config =
+        webhooks::WebhookConfig::load(&s.repo_root).unwrap_or_default();
+    for (branch, frontier) in &branch_advances {
+        let event = webhooks::Event::Push {
+            branch: branch.clone(),
+            tips: frontier.0.iter().map(|h| h.to_hex()).collect(),
+            applied: applied.clone(),
+            skipped: skipped.clone(),
+        };
+        webhooks::fire(&webhook_config, &event);
+    }
+
+    Ok(Json(ApplyResponse { applied, skipped }))
 }
 
 async fn post_comment(
