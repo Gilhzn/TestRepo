@@ -38,8 +38,10 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ✅ Session compiler: before/after text → Mosaic Patch (line-graph)
 - ✅ LSP server (`mosaic-lsp`): document tracking + custom commands
   (mosaic.commit/log/branches/status) + hover info
+- ✅ **VS Code extension** (`mosaic-vscode`): launches mosaic-lsp via
+  vscode-languageclient/node, surfaces all 5 LSP commands in the
+  palette, status-bar entry, configurable LSP path + server URL
 - ⬜ Full equivalence proof: Yjs op-by-op → Pijul ops (research-grade)
-- ⬜ VS Code extension alpha
 
 ## 🔨 M4 — Real-time collaboration
 - ✅ HTTP sync server (`mosaic-serve` binary)
@@ -95,10 +97,13 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ✅ Branch graph visualization: `/api/v1/graph` computes lane assignment
   + depth via Kahn topo walk; SVG renderer in the dashboard with colored
   lanes, branch badges, and clickable change hashes
+- ✅ **Object-storage Cas backends** (`mosaic_core::storage_remote`):
+  `HttpCas` for any S3-compatible / MinIO / R2 / plain-HTTP object
+  store, optional bearer token, zstd + integrity verify. `TieredCas<L,R>`
+  composer for write-through local + remote with cache-on-miss reads.
 - ⬜ Virtual FS (FUSE on Linux/macOS, ProjectedFS on Windows)
-- ⬜ S3 / GCS backend for CAS offload
 - ⬜ Public beta
 
 ---
 
-## Current test count: **167 Rust + 6 TypeScript + 6 Python = 179 / 179 passing**
+## Current test count: **176 Rust + 6 TypeScript + 6 Python = 188 / 188 passing**

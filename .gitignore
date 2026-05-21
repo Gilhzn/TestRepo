@@ -7,3 +7,7 @@ mosaic-sdk-py/__pycache__/
 mosaic-sdk-py/**/__pycache__/
 mosaic-sdk-py/*.egg-info/
 mosaic-sdk-py/.pytest_cache/
+mosaic-vscode/node_modules/
+mosaic-vscode/dist/
+mosaic-vscode/package-lock.json
+mosaic-vscode/*.vsix

@@ -1,0 +1,76 @@
+{
+  "name": "mosaic-vscode",
+  "displayName": "Mosaic",
+  "description": "Mosaic VCS integration for VS Code — agent-native version control",
+  "version": "0.0.1",
+  "publisher": "mosaic",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["SCM Providers", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Mosaic",
+      "properties": {
+        "mosaic.server": {
+          "type": "string",
+          "default": "",
+          "description": "Optional URL of a mosaic-serve instance (e.g. http://localhost:7700). When set, the extension augments the LSP with remote dashboard links."
+        },
+        "mosaic.lspPath": {
+          "type": "string",
+          "default": "mosaic-lsp",
+          "description": "Path to the mosaic-lsp binary. Looked up on $PATH by default."
+        },
+        "mosaic.defaultBranch": {
+          "type": "string",
+          "default": "main",
+          "description": "Branch name used by commit / push commands when no explicit branch is given."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "mosaic.commit",
+        "title": "Mosaic: Commit current file",
+        "category": "Mosaic"
+      },
+      {
+        "command": "mosaic.log",
+        "title": "Mosaic: Show change log",
+        "category": "Mosaic"
+      },
+      {
+        "command": "mosaic.branches",
+        "title": "Mosaic: List branches",
+        "category": "Mosaic"
+      },
+      {
+        "command": "mosaic.status",
+        "title": "Mosaic: Show repository status",
+        "category": "Mosaic"
+      },
+      {
+        "command": "mosaic.openDashboard",
+        "title": "Mosaic: Open web dashboard",
+        "category": "Mosaic"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w"
+  },
+  "type": "commonjs",
+  "license": "Apache-2.0 OR MIT",
+  "dependencies": {
+    "vscode-languageclient": "^9"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5"
+  }
+}

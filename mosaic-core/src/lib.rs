@@ -16,6 +16,7 @@ pub mod merge_strategies;
 pub mod repo;
 pub mod semantic;
 pub mod storage;
+pub mod storage_remote;
 pub mod sync;
 pub mod attestation;
 

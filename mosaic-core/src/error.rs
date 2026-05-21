@@ -73,6 +73,9 @@ pub enum Error {
 
     #[error("attestation invalid validity window")]
     AttestationInvalidWindow,
+
+    #[error("remote storage: {0}")]
+    RemoteStorage(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
