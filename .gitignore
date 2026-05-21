@@ -3,3 +3,7 @@
 mosaic-sdk-ts/node_modules/
 mosaic-sdk-ts/dist/
 mosaic-sdk-ts/package-lock.json
+mosaic-sdk-py/__pycache__/
+mosaic-sdk-py/**/__pycache__/
+mosaic-sdk-py/*.egg-info/
+mosaic-sdk-py/.pytest_cache/

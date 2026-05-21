@@ -69,16 +69,21 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ⬜ Full GumTree algorithm (research-grade)
 - ⬜ "Explain my merge" UI affordance
 
-## 🔨 M6 — Agent SDK
+## ✅ M6 — Agent SDK
 - ✅ Rust SDK (`mosaic-sdk`)
 - ✅ Session API: begin/edit/abort/commit → atomic Change
 - ✅ Speculation: branch / promote / discard for trial-and-error work
 - ✅ attach_as_agent for agent-scoped identities inside human repos
 - ✅ TypeScript SDK (`mosaic-sdk-ts`): MosaicClient over HTTP, full types
+- ✅ **Python SDK (`mosaic-sdk-py`)**: stdlib-only HTTP client + optional
+  LiveSession over WebSocket; opens Mosaic to Python AI agents
 - ✅ Agent attestation chain (`mosaic_core::attestation`): human's long-term
   key signs an Attestation pinning a session pubkey to an Agent identity
   with a validity window; verify() + authorize(Change) check the full chain
-- ⬜ Wire attestation enforcement into push pipeline (optional bundle field)
+- ✅ Push pipeline enforces attestations: Bundle carries Vec<Attestation>;
+  server accepts changes signed by session keys covered by a valid
+  attestation from a trusted invoker (allowlist holds only the team's
+  human keys; agents rotate session keys freely)
 
 ## 🔨 M7 — Scale + forge
 - ✅ Web UI: dashboard with stats / branches / change history
@@ -96,4 +101,4 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 
 ---
 
-## Current test count: **165 Rust + 6 TypeScript = 171 / 171 passing**
+## Current test count: **167 Rust + 6 TypeScript + 6 Python = 179 / 179 passing**
