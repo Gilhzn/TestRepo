@@ -37,6 +37,7 @@ use tokio::sync::Mutex;
 
 pub mod auth;
 pub mod awareness;
+pub mod protection;
 pub mod signaling;
 pub mod webhooks;
 pub mod ws;
@@ -45,6 +46,7 @@ pub struct AppState {
     repo_root: PathBuf,
     lock: Mutex<()>,
     policy: auth::Policy,
+    pub rules: protection::ProtectionRules,
     pub live: Arc<ws::LiveState>,
     pub presence: Arc<awareness::PresenceState>,
     pub signaling: Arc<signaling::SignalingState>,
@@ -54,10 +56,12 @@ impl AppState {
     pub fn new(repo_root: impl Into<PathBuf>) -> Self {
         let repo_root = repo_root.into();
         let policy = auth::Policy::load(&repo_root).unwrap_or_default();
+        let rules = protection::ProtectionRules::load(&repo_root).unwrap_or_default();
         Self {
             repo_root,
             lock: Mutex::new(()),
             policy,
+            rules,
             live: Arc::new(ws::LiveState::new()),
             presence: Arc::new(awareness::PresenceState::new()),
             signaling: Arc::new(signaling::SignalingState::new()),
@@ -65,10 +69,13 @@ impl AppState {
     }
 
     pub fn with_policy(repo_root: impl Into<PathBuf>, policy: auth::Policy) -> Self {
+        let repo_root = repo_root.into();
+        let rules = protection::ProtectionRules::load(&repo_root).unwrap_or_default();
         Self {
-            repo_root: repo_root.into(),
+            repo_root,
             lock: Mutex::new(()),
             policy,
+            rules,
             live: Arc::new(ws::LiveState::new()),
             presence: Arc::new(awareness::PresenceState::new()),
             signaling: Arc::new(signaling::SignalingState::new()),
