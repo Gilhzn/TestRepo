@@ -18,16 +18,20 @@ use crate::m1::signing::SigningKey;
 use crate::m1_dag::dag::{ChangeStore, DagIndex};
 use crate::m1_dag::refs::{Frontier, RefStore};
 use crate::m1_dag::vclock::VectorClock;
+use crate::review::{Approval, Comment};
 use crate::storage::FsCas;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const REPO_DIR: &str = ".mosaic";
 const OBJECTS: &str = "objects";
 const CHANGES: &str = "changes";
 const IDENTITY: &str = "identity";
+const REVIEWS: &str = "reviews";
+const REVIEW_COMMENTS: &str = "comments";
+const REVIEW_APPROVALS: &str = "approvals";
 const HEAD_REF: &str = "main";
 
 pub struct Repository {
@@ -162,6 +166,87 @@ impl Repository {
             }
         }
         clock
+    }
+
+    fn reviews_dir(&self, sub: &str) -> PathBuf {
+        self.root.join(REVIEWS).join(sub)
+    }
+
+    fn review_file_for(&self, sub: &str, change: &ChangeId) -> PathBuf {
+        self.reviews_dir(sub).join(format!("{}.jsonl", change.to_hex()))
+    }
+
+    fn append_jsonl(path: &Path, line: &str) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        f.write_all(line.as_bytes())?;
+        f.write_all(b"\n")?;
+        Ok(())
+    }
+
+    pub fn add_comment(&self, comment: &Comment) -> Result<Hash> {
+        comment.verify()?;
+        let id = comment.id();
+        let line = serde_json::to_string(comment)
+            .map_err(|e| Error::ReviewStore(e.to_string()))?;
+        let path = self.review_file_for(REVIEW_COMMENTS, &comment.change);
+        Self::append_jsonl(&path, &line)?;
+        Ok(id)
+    }
+
+    pub fn add_approval(&self, approval: &Approval) -> Result<Hash> {
+        approval.verify()?;
+        let id = approval.id();
+        let line = serde_json::to_string(approval)
+            .map_err(|e| Error::ReviewStore(e.to_string()))?;
+        let path = self.review_file_for(REVIEW_APPROVALS, &approval.change);
+        Self::append_jsonl(&path, &line)?;
+        Ok(id)
+    }
+
+    pub fn comments_for(&self, change: &ChangeId) -> Result<Vec<Comment>> {
+        let path = self.review_file_for(REVIEW_COMMENTS, change);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = fs::File::open(&path)?;
+        let reader = BufReader::new(file);
+        let mut out = Vec::new();
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let c: Comment = serde_json::from_str(&line)
+                .map_err(|e| Error::ReviewStore(e.to_string()))?;
+            out.push(c);
+        }
+        Ok(out)
+    }
+
+    pub fn approvals_for(&self, change: &ChangeId) -> Result<Vec<Approval>> {
+        let path = self.review_file_for(REVIEW_APPROVALS, change);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = fs::File::open(&path)?;
+        let reader = BufReader::new(file);
+        let mut out = Vec::new();
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let a: Approval = serde_json::from_str(&line)
+                .map_err(|e| Error::ReviewStore(e.to_string()))?;
+            out.push(a);
+        }
+        Ok(out)
     }
 
     pub fn save_identity(&self, identity: &Identity, signing_key: &SigningKey) -> Result<()> {

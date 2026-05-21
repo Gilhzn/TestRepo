@@ -1,12 +1,13 @@
 use clap::{Parser, Subcommand};
 use mosaic_core::chunker::{chunk_and_store, reassemble, Manifest};
-use mosaic_core::m1::change::{ChangeBuilder, FileChange, FileKind};
+use mosaic_core::m1::change::{ChangeBuilder, ChangeId, FileChange, FileKind};
 use mosaic_core::m1::identity::Identity;
 use mosaic_core::m1::signing::SigningKey;
 use mosaic_core::m1_patch::line_graph::{LineGraph, Vertex, VertexId};
 use mosaic_core::m1_patch::merge::{three_way_merge, StructuredConflict};
 use mosaic_core::m1_patch::patch::{Op, Patch};
 use mosaic_core::repo::{Repository, REPO_DIR};
+use mosaic_core::review::{ApprovalBuilder, CommentAnchor, CommentBuilder, Verdict};
 use mosaic_core::storage::Cas;
 use mosaic_core::Hash;
 use std::fs;
@@ -96,6 +97,68 @@ enum Cmd {
     },
     /// Run an end-to-end demo of two agents editing in parallel and merging cleanly.
     Demo,
+    /// Leave a code-review comment on a change.
+    Comment {
+        /// Hex-encoded change id to comment on.
+        change_id: String,
+        /// Body of the comment.
+        #[arg(short, long)]
+        body: String,
+        /// Optional file path the comment is anchored to.
+        #[arg(short, long)]
+        file: Option<String>,
+        /// Optional line number (requires --file).
+        #[arg(short, long)]
+        line: Option<u32>,
+        /// Optional parent comment hash (hex) for threading.
+        #[arg(long)]
+        reply_to: Option<String>,
+    },
+    /// Approve a change.
+    Approve {
+        change_id: String,
+        #[arg(short, long)]
+        body: Option<String>,
+    },
+    /// Request changes on a change.
+    RequestChanges {
+        change_id: String,
+        #[arg(short, long)]
+        body: Option<String>,
+    },
+    /// Print all review comments + approvals on a change in order.
+    Review { change_id: String },
+    /// Show working tree status vs. branch tip.
+    Status {
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
+    /// Show diff of working tree vs. branch tip.
+    Diff {
+        path: Option<String>,
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
+    /// Stage files for the next commit (use `.` for everything modified).
+    Add {
+        paths: Vec<String>,
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
+    /// Unstage files (does not modify working copy).
+    Unstage { paths: Vec<String> },
+    /// Discard working-copy changes for a file (restore to branch tip).
+    Restore {
+        path: String,
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
+    /// Garbage-collect unreachable objects.
+    Gc {
+        /// Show what would be pruned without deleting anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -202,6 +265,26 @@ fn main() -> ExitCode {
             explain,
         } => run(|| merge_cmd(&path, &base, &ours, &theirs, out.as_deref(), explain)),
         Cmd::Demo => run(demo),
+        Cmd::Comment {
+            change_id,
+            body,
+            file,
+            line,
+            reply_to,
+        } => run(|| comment_cmd(&change_id, &body, file.as_deref(), line, reply_to.as_deref())),
+        Cmd::Approve { change_id, body } => {
+            run(|| approve_cmd(&change_id, Verdict::Approved, body.as_deref()))
+        }
+        Cmd::RequestChanges { change_id, body } => {
+            run(|| approve_cmd(&change_id, Verdict::RequestedChanges, body.as_deref()))
+        }
+        Cmd::Review { change_id } => run(|| review_cmd(&change_id)),
+        Cmd::Status { branch } => run(|| status_cmd(&branch)),
+        Cmd::Diff { path, branch } => run(|| diff_cmd(path.as_deref(), &branch)),
+        Cmd::Add { paths, branch } => run(|| add_cmd(&paths, &branch)),
+        Cmd::Unstage { paths } => run(|| unstage_cmd(&paths)),
+        Cmd::Restore { path, branch } => run(|| restore_cmd(&path, &branch)),
+        Cmd::Gc { dry_run } => run(|| gc_cmd(dry_run)),
     }
 }
 
@@ -287,30 +370,58 @@ fn branch_show(name: &str) -> Result<(), AppError> {
 }
 
 fn commit(intent: &str, files: &[PathBuf], branch: &str) -> Result<(), AppError> {
-    let mut repo = open_here()?;
+    use mosaic_core::working_copy::{StagedIndex, WorkingCopy};
+
+    let root = std::env::current_dir()?;
+    let mut repo = Repository::open(&root)?;
     let (identity, key) = repo.load_identity()?;
     let head = repo.refs().get(branch).unwrap_or_default();
     let mut builder = ChangeBuilder::new(identity.clone(), key).intent(intent);
     for h in &head.0 {
         builder = builder.dep(mosaic_core::m1::change::ChangeId(*h));
     }
-    for path in files {
-        let bytes = fs::read(path)?;
-        let kind = if std::str::from_utf8(&bytes).is_ok() {
-            FileKind::Text
-        } else {
-            FileKind::Binary
-        };
-        builder = builder.file(FileChange {
-            path: path.to_string_lossy().into_owned(),
-            kind,
-            patch: bytes,
-            conflicts: Vec::new(),
-        });
+
+    // Two modes: explicit -f flags use those files; otherwise pick up the
+    // staged index and commit everything in it.
+    let mut file_changes: Vec<FileChange> = Vec::new();
+    if !files.is_empty() {
+        for path in files {
+            let bytes = fs::read(path)?;
+            let kind = if std::str::from_utf8(&bytes).is_ok() {
+                FileKind::Text
+            } else {
+                FileKind::Binary
+            };
+            file_changes.push(FileChange {
+                path: path.to_string_lossy().into_owned(),
+                kind,
+                patch: bytes,
+                conflicts: Vec::new(),
+            });
+        }
+    } else {
+        let wc = WorkingCopy::open(&repo, &root);
+        let index = StagedIndex::load(&root)?;
+        if index.paths.is_empty() {
+            return Err(AppError::Msg(
+                "nothing to commit: stage files first with `mos add .` or pass -f <path>".into(),
+            ));
+        }
+        file_changes = wc.build_staged_file_changes(&index)?;
+    }
+
+    for fc in file_changes {
+        builder = builder.file(fc);
     }
     let change = builder.build()?;
     let id = repo.commit(change)?;
     repo.advance_branch(branch, id)?;
+    // Clear the staged index after a successful commit.
+    if files.is_empty() {
+        let mut index = mosaic_core::working_copy::StagedIndex::load(&root)?;
+        index.clear();
+        index.save(&root)?;
+    }
     println!("committed {} on {branch}", &id.to_hex()[..16]);
     Ok(())
 }
@@ -869,6 +980,138 @@ fn demo() -> Result<(), AppError> {
     Ok(())
 }
 
+fn parse_change_id(s: &str) -> Result<ChangeId, AppError> {
+    Ok(ChangeId(Hash::from_hex(s)?))
+}
+
+fn comment_cmd(
+    change_id_hex: &str,
+    body: &str,
+    file: Option<&str>,
+    line: Option<u32>,
+    reply_to: Option<&str>,
+) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let (identity, key) = repo.load_identity()?;
+    let cid = parse_change_id(change_id_hex)?;
+    let anchor = match (file, line) {
+        (Some(path), Some(n)) => CommentAnchor::Line {
+            path: path.to_string(),
+            line: n,
+        },
+        (Some(path), None) => CommentAnchor::File {
+            path: path.to_string(),
+        },
+        (None, Some(_)) => {
+            return Err(AppError::Msg(
+                "--line requires --file".into(),
+            ));
+        }
+        (None, None) => CommentAnchor::Change,
+    };
+    let mut builder = CommentBuilder::new(cid, identity, key)
+        .anchor(anchor)
+        .body(body.to_string());
+    if let Some(parent_hex) = reply_to {
+        let parent = Hash::from_hex(parent_hex)?;
+        builder = builder.reply_to(parent);
+    }
+    let comment = builder.build()?;
+    let id = repo.add_comment(&comment)?;
+    println!("comment {} on {}", &id.to_hex()[..16], &cid.to_hex()[..16]);
+    Ok(())
+}
+
+fn approve_cmd(change_id_hex: &str, verdict: Verdict, body: Option<&str>) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let (identity, key) = repo.load_identity()?;
+    let cid = parse_change_id(change_id_hex)?;
+    let mut builder = ApprovalBuilder::new(cid, identity, key, verdict);
+    if let Some(b) = body {
+        builder = builder.body(b.to_string());
+    }
+    let approval = builder.build()?;
+    let id = repo.add_approval(&approval)?;
+    let label = match verdict {
+        Verdict::Approved => "approved",
+        Verdict::RequestedChanges => "requested changes on",
+        Verdict::Commented => "commented on",
+    };
+    println!("{} {} (approval {})", label, &cid.to_hex()[..16], &id.to_hex()[..16]);
+    Ok(())
+}
+
+fn review_cmd(change_id_hex: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let cid = parse_change_id(change_id_hex)?;
+    let comments = repo.comments_for(&cid)?;
+    let approvals = repo.approvals_for(&cid)?;
+
+    // Merge by timestamp ascending so we get a chronological review log.
+    #[derive(Clone)]
+    enum Item {
+        Comment(mosaic_core::review::Comment),
+        Approval(mosaic_core::review::Approval),
+    }
+    impl Item {
+        fn ts(&self) -> mosaic_core::m1::change::Tai64N {
+            match self {
+                Item::Comment(c) => c.ts,
+                Item::Approval(a) => a.ts,
+            }
+        }
+    }
+    let mut items: Vec<Item> = Vec::new();
+    items.extend(comments.into_iter().map(Item::Comment));
+    items.extend(approvals.into_iter().map(Item::Approval));
+    items.sort_by_key(|i| i.ts());
+
+    if items.is_empty() {
+        println!("(no review activity on {})", &cid.to_hex()[..16]);
+        return Ok(());
+    }
+
+    println!("review of {}:", &cid.to_hex()[..16]);
+    for it in items {
+        match it {
+            Item::Comment(c) => {
+                let where_str = match &c.anchor {
+                    CommentAnchor::Change => "(change)".to_string(),
+                    CommentAnchor::File { path } => format!("(file {path})"),
+                    CommentAnchor::Line { path, line } => format!("({path}:{line})"),
+                };
+                println!(
+                    "  comment {} by {} {}: {}",
+                    &c.id().to_hex()[..12],
+                    c.author.display(),
+                    where_str,
+                    c.body
+                );
+            }
+            Item::Approval(a) => {
+                let v = match a.verdict {
+                    Verdict::Approved => "APPROVED",
+                    Verdict::RequestedChanges => "REQUESTED CHANGES",
+                    Verdict::Commented => "COMMENTED",
+                };
+                let body = a.body.as_deref().unwrap_or("");
+                println!(
+                    "  {} {} by {}{}",
+                    v,
+                    &a.id().to_hex()[..12],
+                    a.reviewer.display(),
+                    if body.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {body}")
+                    }
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn print_graph(label: &str, graph: &LineGraph) {
     println!("{label}:");
     for line in graph.flatten() {
@@ -892,6 +1135,182 @@ fn short(h: &Hash) -> String {
 
 fn open_here() -> Result<Repository, AppError> {
     Repository::open(std::env::current_dir()?).map_err(Into::into)
+}
+
+fn status_cmd(branch: &str) -> Result<(), AppError> {
+    use mosaic_core::working_copy::{FileState, StagedIndex, WorkingCopy};
+    let root = std::env::current_dir()?;
+    let repo = Repository::open(&root)?;
+    let wc = WorkingCopy::open(&repo, &root);
+    let index = StagedIndex::load(&root)?;
+    let entries = wc.status(branch, &index)?;
+
+    if entries.is_empty() {
+        println!("clean working tree (branch {branch})");
+        return Ok(());
+    }
+
+    let mut staged: Vec<&str> = Vec::new();
+    let mut unstaged: Vec<(&str, &str)> = Vec::new();
+    let mut untracked: Vec<&str> = Vec::new();
+    let mut removed: Vec<&str> = Vec::new();
+
+    for e in &entries {
+        let tag = match e.state {
+            FileState::Modified => "modified",
+            FileState::Untracked => "untracked",
+            FileState::Removed => "removed",
+            FileState::Unmodified => "unmodified",
+        };
+        match (e.state, e.staged) {
+            (FileState::Untracked, false) => untracked.push(&e.path),
+            (FileState::Removed, _) => removed.push(&e.path),
+            (_, true) => staged.push(&e.path),
+            _ => unstaged.push((tag, &e.path)),
+        }
+    }
+
+    if !staged.is_empty() {
+        println!("Staged for commit:");
+        for p in &staged {
+            println!("    {p}");
+        }
+        println!();
+    }
+    if !unstaged.is_empty() {
+        println!("Changes not staged for commit:");
+        for (tag, p) in &unstaged {
+            println!("    {tag:<10} {p}");
+        }
+        println!("  (use `mos add <file>` or `mos add .` to stage them)");
+        println!();
+    }
+    if !untracked.is_empty() {
+        println!("Untracked files:");
+        for p in &untracked {
+            println!("    {p}");
+        }
+        println!("  (use `mos add <file>` to start tracking)");
+        println!();
+    }
+    if !removed.is_empty() {
+        println!("Deleted from working tree:");
+        for p in &removed {
+            println!("    {p}");
+        }
+        println!();
+    }
+    println!("Branch: {branch}");
+    Ok(())
+}
+
+fn diff_cmd(path: Option<&str>, branch: &str) -> Result<(), AppError> {
+    use mosaic_core::working_copy::{FileState, StagedIndex, WorkingCopy};
+    let root = std::env::current_dir()?;
+    let repo = Repository::open(&root)?;
+    let wc = WorkingCopy::open(&repo, &root);
+
+    let targets: Vec<String> = match path {
+        Some(p) => vec![p.to_string()],
+        None => {
+            let index = StagedIndex::load(&root)?;
+            wc.status(branch, &index)?
+                .into_iter()
+                .filter(|e| matches!(e.state, FileState::Modified | FileState::Untracked))
+                .map(|e| e.path)
+                .collect()
+        }
+    };
+    if targets.is_empty() {
+        println!("(no differences)");
+        return Ok(());
+    }
+    for p in targets {
+        let text = wc.diff_text(branch, &p)?;
+        if text.is_empty() {
+            continue;
+        }
+        println!("--- {p} (branch {branch})");
+        println!("+++ {p} (working tree)");
+        print!("{text}");
+    }
+    Ok(())
+}
+
+fn add_cmd(paths: &[String], branch: &str) -> Result<(), AppError> {
+    use mosaic_core::working_copy::{StagedIndex, WorkingCopy};
+    let root = std::env::current_dir()?;
+    let repo = Repository::open(&root)?;
+    let wc = WorkingCopy::open(&repo, &root);
+    let mut index = StagedIndex::load(&root)?;
+
+    if paths.is_empty() || paths.iter().any(|p| p == ".") {
+        let added = wc.stage_all_modified(branch, &mut index)?;
+        index.save(&root)?;
+        println!("staged {added} file(s)");
+        return Ok(());
+    }
+    for p in paths {
+        index.stage(p.clone());
+    }
+    index.save(&root)?;
+    println!("staged {} file(s)", paths.len());
+    Ok(())
+}
+
+fn unstage_cmd(paths: &[String]) -> Result<(), AppError> {
+    use mosaic_core::working_copy::StagedIndex;
+    let root = std::env::current_dir()?;
+    let mut index = StagedIndex::load(&root)?;
+    let mut removed = 0;
+    for p in paths {
+        if index.unstage(p) {
+            removed += 1;
+        }
+    }
+    index.save(&root)?;
+    println!("unstaged {removed} file(s)");
+    Ok(())
+}
+
+fn restore_cmd(path: &str, branch: &str) -> Result<(), AppError> {
+    use mosaic_core::working_copy::WorkingCopy;
+    let root = std::env::current_dir()?;
+    let repo = Repository::open(&root)?;
+    let wc = WorkingCopy::open(&repo, &root);
+    let restored = wc.restore(branch, path)?;
+    if restored {
+        println!("restored {path} to branch tip");
+    } else {
+        println!("nothing to restore for {path} (not in branch tip)");
+    }
+    Ok(())
+}
+
+fn gc_cmd(dry_run: bool) -> Result<(), AppError> {
+    use mosaic_core::gc::{collect, GcMode};
+    let repo = open_here()?;
+    let mode = if dry_run { GcMode::DryRun } else { GcMode::Apply };
+    let report = collect(&repo, mode)?;
+
+    println!("live changes: {}", report.live_changes);
+    println!("live blobs:   {}", report.live_blobs);
+    if dry_run {
+        println!(
+            "would prune:  {} changes, {} blobs, {} bytes",
+            report.pruned_changes.len(),
+            report.pruned_blobs.len(),
+            report.bytes_freed,
+        );
+    } else {
+        println!(
+            "pruned:       {} changes, {} blobs, {} bytes freed",
+            report.pruned_changes.len(),
+            report.pruned_blobs.len(),
+            report.bytes_freed,
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]

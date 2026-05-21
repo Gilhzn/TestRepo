@@ -14,11 +14,14 @@ pub mod m1_dag;
 pub mod m1_patch;
 pub mod merge_strategies;
 pub mod repo;
+pub mod review;
 pub mod semantic;
 pub mod storage;
 pub mod storage_remote;
 pub mod sync;
 pub mod attestation;
+pub mod working_copy;
+pub mod gc;
 
 pub use error::Error;
 pub use hash::Hash;

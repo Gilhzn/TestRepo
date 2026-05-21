@@ -76,6 +76,15 @@ pub enum Error {
 
     #[error("remote storage: {0}")]
     RemoteStorage(String),
+
+    #[error("invalid comment: {0}")]
+    InvalidComment(String),
+
+    #[error("invalid approval: {0}")]
+    InvalidApproval(String),
+
+    #[error("review store: {0}")]
+    ReviewStore(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

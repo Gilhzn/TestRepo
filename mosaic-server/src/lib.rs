@@ -27,6 +27,7 @@ use mosaic_core::error::Error;
 use mosaic_core::m1::change::ChangeId;
 use mosaic_core::m1_dag::refs::Frontier;
 use mosaic_core::repo::Repository;
+use mosaic_core::review::{Approval, Comment};
 use mosaic_core::sync::{apply_bundle, build_bundle_for_branch, missing_changes_for, Bundle};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -94,6 +95,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/graph", get(branch_graph))
         .route("/api/v1/missing", get(missing))
         .route("/api/v1/bundle", post(post_bundle))
+        .route("/api/v1/changes/:id/comments", get(list_comments).post(post_comment))
+        .route("/api/v1/changes/:id/approvals", get(list_approvals).post(post_approval))
         .route("/api/v1/live-stats", get(live_stats))
         .route("/ws/doc/:name", get(ws::ws_handler))
         .route("/ws/awareness/:name", get(awareness::awareness_handler))
@@ -482,6 +485,58 @@ async fn post_bundle(
     }))
 }
 
+async fn post_comment(
+    State(s): State<Arc<AppState>>,
+    Path(id_hex): Path<String>,
+    Json(comment): Json<Comment>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let h = mosaic_core::Hash::from_hex(&id_hex)?;
+    if comment.change != ChangeId(h) {
+        return Err(AppError::Forbidden(
+            "comment.change does not match URL".into(),
+        ));
+    }
+    let _guard = s.lock.lock().await;
+    let repo = s.open()?;
+    let cid = repo.add_comment(&comment)?;
+    Ok(Json(serde_json::json!({ "id": cid.to_hex() })))
+}
+
+async fn list_comments(
+    State(s): State<Arc<AppState>>,
+    Path(id_hex): Path<String>,
+) -> Result<Json<Vec<Comment>>, AppError> {
+    let repo = s.open()?;
+    let h = mosaic_core::Hash::from_hex(&id_hex)?;
+    Ok(Json(repo.comments_for(&ChangeId(h))?))
+}
+
+async fn post_approval(
+    State(s): State<Arc<AppState>>,
+    Path(id_hex): Path<String>,
+    Json(approval): Json<Approval>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let h = mosaic_core::Hash::from_hex(&id_hex)?;
+    if approval.change != ChangeId(h) {
+        return Err(AppError::Forbidden(
+            "approval.change does not match URL".into(),
+        ));
+    }
+    let _guard = s.lock.lock().await;
+    let repo = s.open()?;
+    let aid = repo.add_approval(&approval)?;
+    Ok(Json(serde_json::json!({ "id": aid.to_hex() })))
+}
+
+async fn list_approvals(
+    State(s): State<Arc<AppState>>,
+    Path(id_hex): Path<String>,
+) -> Result<Json<Vec<Approval>>, AppError> {
+    let repo = s.open()?;
+    let h = mosaic_core::Hash::from_hex(&id_hex)?;
+    Ok(Json(repo.approvals_for(&ChangeId(h))?))
+}
+
 fn parse_have(s: &str) -> Result<Frontier, AppError> {
     let mut set = BTreeSet::new();
     if s.trim().is_empty() {
@@ -520,6 +575,12 @@ impl IntoResponse for AppError {
                 StatusCode::FORBIDDEN,
                 "signature verification failed".into(),
             ),
+            AppError::Core(Error::InvalidComment(m)) => {
+                (StatusCode::BAD_REQUEST, format!("invalid comment: {m}"))
+            }
+            AppError::Core(Error::InvalidApproval(m)) => {
+                (StatusCode::BAD_REQUEST, format!("invalid approval: {m}"))
+            }
             AppError::Forbidden(s) => (StatusCode::FORBIDDEN, s.clone()),
             other => (StatusCode::INTERNAL_SERVER_ERROR, format!("{other}")),
         };
@@ -1207,6 +1268,101 @@ mod tests {
 
         let _ = alice.close(None).await;
         let _ = bob.close(None).await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn http_post_then_get_comment_roundtrip() {
+        use mosaic_core::hash::Hash;
+        use mosaic_core::m1::change::Tai64N;
+        use mosaic_core::review::{CommentAnchor, CommentBuilder};
+
+        let dir = TempDir::new().unwrap();
+        let _ = Repository::init(dir.path()).unwrap();
+        let (idn, key) = human();
+
+        let cid = {
+            let mut repo = Repository::open(dir.path()).unwrap();
+            one_commit(&mut repo, &idn, &key, "first")
+        };
+
+        let (addr, handle) =
+            serve(dir.path(), "127.0.0.1:0".parse().unwrap()).await.unwrap();
+
+        let author_key = SigningKey::generate();
+        let author = Identity::human("reviewer@example.com", Some("Rev".into())).unwrap();
+        let comment = CommentBuilder::new(cid, author, author_key)
+            .ts(Tai64N(1234, 0))
+            .anchor(CommentAnchor::Line {
+                path: "first.txt".into(),
+                line: 1,
+            })
+            .body("nit: rename this")
+            .build()
+            .unwrap();
+
+        let url = format!("http://{addr}/api/v1/changes/{}/comments", cid.to_hex());
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .json(&comment)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let returned_hex = body["id"].as_str().unwrap();
+        let returned = Hash::from_hex(returned_hex).unwrap();
+        assert_eq!(returned, comment.id());
+
+        let resp: Vec<Comment> = reqwest::get(&url).await.unwrap().json().await.unwrap();
+        assert_eq!(resp.len(), 1);
+        assert_eq!(resp[0].body, "nit: rename this");
+        assert_eq!(resp[0].change, cid);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn http_rejects_tampered_comment_with_403() {
+        use mosaic_core::m1::change::Tai64N;
+        use mosaic_core::review::{CommentAnchor, CommentBuilder};
+
+        let dir = TempDir::new().unwrap();
+        let _ = Repository::init(dir.path()).unwrap();
+        let (idn, key) = human();
+
+        let cid = {
+            let mut repo = Repository::open(dir.path()).unwrap();
+            one_commit(&mut repo, &idn, &key, "first")
+        };
+
+        let (addr, handle) =
+            serve(dir.path(), "127.0.0.1:0".parse().unwrap()).await.unwrap();
+
+        let author_key = SigningKey::generate();
+        let author = Identity::human("reviewer@example.com", Some("Rev".into())).unwrap();
+        let mut comment = CommentBuilder::new(cid, author, author_key)
+            .ts(Tai64N(1234, 0))
+            .anchor(CommentAnchor::Change)
+            .body("original")
+            .build()
+            .unwrap();
+        // Tamper after signing — the on-the-wire payload no longer matches the sig.
+        comment.body = "TAMPERED".into();
+
+        let url = format!("http://{addr}/api/v1/changes/{}/comments", cid.to_hex());
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .json(&comment)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // GET still returns empty list — nothing was persisted.
+        let listed: Vec<Comment> = reqwest::get(&url).await.unwrap().json().await.unwrap();
+        assert!(listed.is_empty());
+
         handle.abort();
     }
 

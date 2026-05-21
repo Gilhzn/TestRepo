@@ -121,4 +121,18 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 
 ---
 
-## Current test count: **192 Rust + 6 TypeScript + 6 Python = 204 / 204 passing**
+## Working-tree workflow (NEW — closes the muscle-memory gap)
+- ✅ `mos status` — modified / untracked / staged / removed entries vs. branch tip
+- ✅ `mos diff [path]` — unified diff of working tree vs. branch tip
+- ✅ `mos add .` / `mos add <files>` — Git-like staging into `.mosaic/index.json`
+- ✅ `mos unstage <files>` — drop from staged index without touching working tree
+- ✅ `mos restore <path>` — discard working-tree changes back to branch tip
+- ✅ `mos commit -i "..."` — uses staged index when no `-f` given, clears index after success
+- ✅ `mos gc [--dry-run]` — mark-and-sweep prune of unreachable changes + CAS blobs
+- ✅ Code review system: `mos comment / approve / request-changes / review`
+  with ed25519-signed Comments + Approvals stored at
+  `.mosaic/reviews/{comments,approvals}/<change>.jsonl`; server endpoints
+  `GET/POST /api/v1/changes/:id/{comments,approvals}` verify signatures
+  and reject tampered payloads with 403.
+
+## Current test count: **212 Rust + 6 TypeScript + 6 Python = 224 / 224 passing**
