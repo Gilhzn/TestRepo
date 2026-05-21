@@ -58,6 +58,23 @@ enum Cmd {
     /// Import history from another VCS.
     #[command(subcommand)]
     Import(ImportCmd),
+    /// Manage remote sync servers.
+    #[command(subcommand)]
+    Remote(RemoteCmd),
+    /// Push local changes to a remote.
+    Push {
+        #[arg(default_value = "origin")]
+        remote: String,
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
+    /// Pull changes from a remote.
+    Pull {
+        #[arg(default_value = "origin")]
+        remote: String,
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
     /// Three-way merge a file across the patch + semantic layers.
     Merge {
         /// In-repo path (used to pick the language for semantic analysis).
@@ -79,6 +96,16 @@ enum Cmd {
 enum ImportCmd {
     /// Import a Git repository's history.
     Git { path: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum RemoteCmd {
+    /// Add a named remote URL.
+    Add { name: String, url: String },
+    /// Remove a remote.
+    Remove { name: String },
+    /// List configured remotes.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -139,6 +166,11 @@ fn main() -> ExitCode {
         Cmd::Bundle(BundleCmd::Apply { path }) => run(|| bundle_apply(&path)),
         Cmd::Bundle(BundleCmd::Inspect { path }) => run(|| bundle_inspect(&path)),
         Cmd::Import(ImportCmd::Git { path }) => run(|| import_git_cmd(&path)),
+        Cmd::Remote(RemoteCmd::Add { name, url }) => run(|| remote_add(&name, &url)),
+        Cmd::Remote(RemoteCmd::Remove { name }) => run(|| remote_remove(&name)),
+        Cmd::Remote(RemoteCmd::List) => run(remote_list),
+        Cmd::Push { remote, branch } => run(|| push_cmd(&remote, &branch)),
+        Cmd::Pull { remote, branch } => run(|| pull_cmd(&remote, &branch)),
         Cmd::Merge {
             path,
             base,
@@ -351,6 +383,150 @@ fn bundle_apply(path: &PathBuf) -> Result<(), AppError> {
     let report = mosaic_core::sync::apply_bundle(&mut repo, &bundle)?;
     println!(
         "applied {} change(s), skipped {} duplicate(s)",
+        report.applied.len(),
+        report.skipped.len()
+    );
+    for id in &report.applied {
+        println!("  + {}", &id.to_hex()[..16]);
+    }
+    Ok(())
+}
+
+fn remotes_file() -> Result<PathBuf, AppError> {
+    Ok(std::env::current_dir()?.join(".mosaic").join("remotes.json"))
+}
+
+fn load_remotes() -> Result<std::collections::BTreeMap<String, String>, AppError> {
+    let path = remotes_file()?;
+    if !path.exists() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let raw = fs::read_to_string(&path)?;
+    serde_json::from_str(&raw).map_err(|e| AppError::Encode(e.to_string()))
+}
+
+fn save_remotes(map: &std::collections::BTreeMap<String, String>) -> Result<(), AppError> {
+    let path = remotes_file()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let raw = serde_json::to_string_pretty(map).map_err(|e| AppError::Encode(e.to_string()))?;
+    fs::write(path, raw)?;
+    Ok(())
+}
+
+fn remote_add(name: &str, url: &str) -> Result<(), AppError> {
+    let mut map = load_remotes()?;
+    let url = url.trim_end_matches('/').to_string();
+    map.insert(name.to_string(), url.clone());
+    save_remotes(&map)?;
+    println!("added remote {name} -> {url}");
+    Ok(())
+}
+
+fn remote_remove(name: &str) -> Result<(), AppError> {
+    let mut map = load_remotes()?;
+    if map.remove(name).is_none() {
+        return Err(AppError::Msg(format!("no such remote: {name}")));
+    }
+    save_remotes(&map)?;
+    println!("removed remote {name}");
+    Ok(())
+}
+
+fn remote_list() -> Result<(), AppError> {
+    let map = load_remotes()?;
+    if map.is_empty() {
+        println!("(no remotes configured)");
+        return Ok(());
+    }
+    for (name, url) in map {
+        println!("{name:<20} {url}");
+    }
+    Ok(())
+}
+
+fn resolve_remote(name: &str) -> Result<String, AppError> {
+    let map = load_remotes()?;
+    map.get(name)
+        .cloned()
+        .ok_or_else(|| AppError::Msg(format!("no such remote: {name}")))
+}
+
+fn push_cmd(remote: &str, branch: &str) -> Result<(), AppError> {
+    let base = resolve_remote(remote)?;
+    let repo = open_here()?;
+    let tips = repo.refs().get(branch)?;
+    let have_url = format!("{base}/api/v1/branches/{branch}");
+    let client = reqwest::blocking::Client::new();
+    let server_have = client
+        .get(&have_url)
+        .send()
+        .ok()
+        .and_then(|r| r.json::<mosaic_server::BranchSummary>().ok())
+        .map(|s| {
+            let mut frontier = mosaic_core::m1_dag::refs::Frontier::default();
+            for h in s.tips {
+                if let Ok(hh) = Hash::from_hex(&h) {
+                    frontier.0.insert(hh);
+                }
+            }
+            frontier
+        })
+        .unwrap_or_default();
+
+    let needed = mosaic_core::sync::missing_changes_for(&repo, &server_have, &tips);
+    if needed.is_empty() {
+        println!("nothing to push; remote {remote} is up to date on {branch}");
+        return Ok(());
+    }
+    let mut bundle = mosaic_core::sync::build_bundle(&repo, &needed)?;
+    bundle.branch_advances.insert(branch.to_string(), tips);
+    let body = bundle.encode()?;
+    let resp = client
+        .post(format!("{base}/api/v1/bundle"))
+        .body(body)
+        .send()
+        .map_err(|e| AppError::Msg(format!("push: {e}")))?;
+    let status = resp.status();
+    let report: mosaic_server::ApplyResponse = resp
+        .json()
+        .map_err(|e| AppError::Msg(format!("push response: {e}")))?;
+    if !status.is_success() {
+        return Err(AppError::Msg(format!("push failed: {status}")));
+    }
+    println!(
+        "pushed {} change(s) to {remote}/{branch} (skipped {})",
+        report.applied.len(),
+        report.skipped.len()
+    );
+    Ok(())
+}
+
+fn pull_cmd(remote: &str, branch: &str) -> Result<(), AppError> {
+    let base = resolve_remote(remote)?;
+    let mut repo = open_here()?;
+    let local = repo.refs().get(branch).unwrap_or_default();
+    let have: Vec<String> = local.0.iter().map(|h| h.to_hex()).collect();
+    let url = format!(
+        "{base}/api/v1/missing?branch={branch}&have={have}",
+        have = have.join(",")
+    );
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .get(&url)
+        .send()
+        .map_err(|e| AppError::Msg(format!("pull: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(AppError::Msg(format!("pull failed: {}", resp.status())));
+    }
+    let bytes = resp
+        .bytes()
+        .map_err(|e| AppError::Msg(format!("pull bytes: {e}")))?;
+    let bundle = mosaic_core::sync::Bundle::decode(&bytes)?;
+    let report = mosaic_core::sync::apply_bundle(&mut repo, &bundle)?;
+    println!(
+        "pulled {} change(s) from {remote}/{branch} (skipped {})",
         report.applied.len(),
         report.skipped.len()
     );
@@ -585,6 +761,8 @@ fn open_here() -> Result<Repository, AppError> {
 
 #[derive(Debug, thiserror::Error)]
 enum AppError {
+    #[error("{0}")]
+    Msg(String),
     #[error(transparent)]
     Core(#[from] mosaic_core::Error),
     #[error("io: {0}")]

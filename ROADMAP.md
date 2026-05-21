@@ -40,8 +40,13 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 - ⬜ LSP server (`mosaic-lsp`)
 - ⬜ VS Code extension alpha
 
-## ⬜ M4 — Real-time collaboration
-- ⬜ WebSocket hub (y-websocket protocol)
+## 🔨 M4 — Real-time collaboration
+- ✅ HTTP sync server (`mosaic-serve` binary)
+- ✅ REST API: /health, /branches, /branches/:name, /missing, /bundle
+- ✅ Branch-aware bundles: branch_advances ride along with push
+- ✅ CLI: `mos remote add/list/remove`, `mos push/pull`
+- ✅ Two-machine multi-direction sync verified end-to-end
+- ⬜ WebSocket hub (y-websocket protocol) for live co-editing
 - ⬜ WebRTC P2P fallback
 - ⬜ Awareness / presence channel
 - ⬜ Agent session protocol (session → atomic change stamp)
@@ -74,4 +79,4 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 
 ---
 
-## Current test count: **129 / 129 passing**
+## Current test count: **133 / 133 passing**

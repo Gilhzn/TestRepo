@@ -24,6 +24,8 @@ pub struct Bundle {
     pub magic: [u8; 8],
     pub changes: Vec<Change>,
     pub blobs: BTreeMap<Hash, Vec<u8>>,
+    #[serde(default)]
+    pub branch_advances: BTreeMap<String, Frontier>,
 }
 
 impl Bundle {
@@ -32,7 +34,13 @@ impl Bundle {
             magic: *BUNDLE_MAGIC,
             changes,
             blobs,
+            branch_advances: BTreeMap::new(),
         }
+    }
+
+    pub fn with_branch_advance(mut self, name: impl Into<String>, frontier: Frontier) -> Self {
+        self.branch_advances.insert(name.into(), frontier);
+        self
     }
 
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -110,6 +118,18 @@ pub fn build_bundle(repo: &Repository, change_ids: &[ChangeId]) -> Result<Bundle
     Ok(Bundle::new(changes, blobs))
 }
 
+pub fn build_bundle_for_branch(
+    repo: &Repository,
+    branch: &str,
+    change_ids: &[ChangeId],
+) -> Result<Bundle> {
+    let mut bundle = build_bundle(repo, change_ids)?;
+    if let Ok(frontier) = repo.refs().get(branch) {
+        bundle.branch_advances.insert(branch.to_string(), frontier);
+    }
+    Ok(bundle)
+}
+
 #[derive(Debug, Clone)]
 pub struct ApplyReport {
     pub applied: Vec<ChangeId>,
@@ -169,6 +189,21 @@ pub fn apply_bundle(repo: &mut Repository, bundle: &Bundle) -> Result<ApplyRepor
             repo.commit(change)?;
             applied.push(id);
         }
+    }
+
+    for (branch, frontier) in &bundle.branch_advances {
+        let mut combined = repo
+            .refs()
+            .get(branch)
+            .unwrap_or_default();
+        for h in &frontier.0 {
+            if repo.index().contains(h) {
+                let ancestors = repo.index().ancestors_of(h);
+                combined.0.retain(|existing| !ancestors.contains(existing));
+                combined.0.insert(*h);
+            }
+        }
+        repo.refs().put(branch, &combined)?;
     }
 
     Ok(ApplyReport { applied, skipped })
@@ -320,6 +355,33 @@ mod tests {
 
         let mut dst = Repository::init(dst_dir.path()).unwrap();
         assert!(apply_bundle(&mut dst, &bundle).is_err());
+    }
+
+    #[test]
+    fn branch_advances_round_trip_through_bundle() {
+        let src_dir = TempDir::new().unwrap();
+        let dst_dir = TempDir::new().unwrap();
+
+        let mut src = Repository::init(src_dir.path()).unwrap();
+        let (idn, key) = human();
+        let id = commit_one(&mut src, &idn, &key, "first", vec![], vec![fc("a", b"a")]);
+        src.advance_branch("main", id).unwrap();
+
+        let bundle = build_bundle_for_branch(&src, "main", &[id]).unwrap();
+        assert!(
+            !bundle.branch_advances.is_empty(),
+            "build_bundle_for_branch should embed branch frontier"
+        );
+
+        let bytes = bundle.encode().unwrap();
+        let back = Bundle::decode(&bytes).unwrap();
+        assert_eq!(back.branch_advances.len(), 1);
+        assert!(back.branch_advances.contains_key("main"));
+
+        let mut dst = Repository::init(dst_dir.path()).unwrap();
+        apply_bundle(&mut dst, &back).unwrap();
+        let dst_main = dst.refs().get("main").unwrap();
+        assert!(dst_main.0.contains(&id.0));
     }
 
     #[test]
