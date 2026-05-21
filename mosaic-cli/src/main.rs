@@ -1,18 +1,21 @@
 use clap::{Parser, Subcommand};
 use mosaic_core::chunker::{chunk_and_store, reassemble, Manifest};
-use mosaic_core::storage::{Cas, FsCas};
+use mosaic_core::m1::change::{ChangeBuilder, FileChange, FileKind};
+use mosaic_core::m1::identity::Identity;
+use mosaic_core::m1::signing::SigningKey;
+use mosaic_core::m1_patch::line_graph::{LineGraph, Vertex, VertexId};
+use mosaic_core::m1_patch::merge::{three_way_merge, StructuredConflict};
+use mosaic_core::m1_patch::patch::{Op, Patch};
+use mosaic_core::repo::{Repository, REPO_DIR};
+use mosaic_core::storage::Cas;
 use mosaic_core::Hash;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-const REPO_DIR: &str = ".mosaic";
-const CAS_DIR: &str = "objects";
-const MANIFEST_DIR: &str = "manifests";
-
 #[derive(Parser)]
-#[command(name = "mos", version, about = "Mosaic VCS")]
+#[command(name = "mos", version, about = "Mosaic VCS — agent-native version control")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -22,26 +25,75 @@ struct Cli {
 enum Cmd {
     /// Create a fresh Mosaic repository in the current directory.
     Init,
-    /// Store a file: chunk + CAS, print the manifest hash.
-    Put {
-        path: PathBuf,
+    /// Manage the local identity (human or agent).
+    #[command(subcommand)]
+    Id(IdCmd),
+    /// Inspect the change history.
+    Log,
+    /// Manage branch frontiers.
+    #[command(subcommand)]
+    Branch(BranchCmd),
+    /// Record a new change against the current head.
+    Commit {
+        #[arg(short, long)]
+        intent: String,
+        #[arg(short, long)]
+        file: Vec<PathBuf>,
+        #[arg(short, long, default_value = "main")]
+        branch: String,
     },
-    /// Restore a file from a manifest hash to stdout (or a path).
+    /// Store a binary blob via FastCDC and print its manifest hash.
+    Put { path: PathBuf },
+    /// Restore a blob from a manifest hash.
     Cat {
         hash: String,
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
-    /// Show storage stats.
+    /// Storage statistics.
     Stats,
+    /// Run an end-to-end demo of two agents editing in parallel and merging cleanly.
+    Demo,
+}
+
+#[derive(Subcommand)]
+enum IdCmd {
+    /// Print the current identity.
+    Show,
+    /// Configure a human identity (generates a signing key).
+    Setup {
+        #[arg(long)]
+        email: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum BranchCmd {
+    /// List branches and their frontier sizes.
+    List,
+    /// Show the frontier of a branch as a list of change hashes.
+    Show { name: String },
 }
 
 fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Init => run(init),
+        Cmd::Id(IdCmd::Show) => run(id_show),
+        Cmd::Id(IdCmd::Setup { email, name }) => run(|| id_setup(&email, name.as_deref())),
+        Cmd::Log => run(log),
+        Cmd::Branch(BranchCmd::List) => run(branch_list),
+        Cmd::Branch(BranchCmd::Show { name }) => run(|| branch_show(&name)),
+        Cmd::Commit {
+            intent,
+            file,
+            branch,
+        } => run(|| commit(&intent, &file, &branch)),
         Cmd::Put { path } => run(|| put(&path)),
         Cmd::Cat { hash, out } => run(|| cat(&hash, out.as_deref())),
         Cmd::Stats => run(stats),
+        Cmd::Demo => run(demo),
     }
 }
 
@@ -56,23 +108,111 @@ fn run(f: impl FnOnce() -> Result<(), AppError>) -> ExitCode {
 }
 
 fn init() -> Result<(), AppError> {
-    let repo = Path::new(REPO_DIR);
-    if repo.exists() {
-        return Err(AppError::Msg(format!("{REPO_DIR} already exists")));
-    }
-    fs::create_dir_all(repo.join(CAS_DIR))?;
-    fs::create_dir_all(repo.join(MANIFEST_DIR))?;
+    Repository::init(std::env::current_dir()?)?;
     println!("initialized empty Mosaic repository in {REPO_DIR}/");
     Ok(())
 }
 
-fn put(path: &Path) -> Result<(), AppError> {
-    let (cas, manifest_dir) = open_repo()?;
+fn id_show() -> Result<(), AppError> {
+    let repo = open_here()?;
+    if !repo.has_identity() {
+        println!("no identity configured; run `mos id setup --email <addr>`");
+        return Ok(());
+    }
+    let (id, key) = repo.load_identity()?;
+    println!("identity: {}", id.display());
+    println!("id:       {}", id.id());
+    println!("pubkey:   {}", hex::encode(key.verifying_key().to_bytes()));
+    Ok(())
+}
+
+fn id_setup(email: &str, name: Option<&str>) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let identity = Identity::human(email, name.map(str::to_string))?;
+    let key = SigningKey::generate();
+    repo.save_identity(&identity, &key)?;
+    println!("identity configured: {}", identity.display());
+    println!("pubkey: {}", hex::encode(key.verifying_key().to_bytes()));
+    Ok(())
+}
+
+fn log() -> Result<(), AppError> {
+    let repo = open_here()?;
+    let all = repo.all_change_ids()?;
+    if all.is_empty() {
+        println!("no changes yet");
+        return Ok(());
+    }
+    let ordered = repo.topo_order(&all);
+    for id in ordered {
+        let change = repo.load_change(&mosaic_core::m1::change::ChangeId(id))?;
+        let intent = change.intent.as_deref().unwrap_or("(no intent)");
+        println!("{}  {}  by {}", &id.to_hex()[..12], intent, change.author.display());
+    }
+    Ok(())
+}
+
+fn branch_list() -> Result<(), AppError> {
+    let repo = open_here()?;
+    let names = repo.refs().list()?;
+    if names.is_empty() {
+        println!("(no branches)");
+        return Ok(());
+    }
+    for name in names {
+        let f = repo.refs().get(&name)?;
+        println!("{:<24} {} tip(s)", name, f.0.len());
+    }
+    Ok(())
+}
+
+fn branch_show(name: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let f = repo.refs().get(name)?;
+    if f.0.is_empty() {
+        println!("(empty frontier)");
+    }
+    for h in &f.0 {
+        println!("{h}");
+    }
+    Ok(())
+}
+
+fn commit(intent: &str, files: &[PathBuf], branch: &str) -> Result<(), AppError> {
+    let mut repo = open_here()?;
+    let (identity, key) = repo.load_identity()?;
+    let head = repo.refs().get(branch).unwrap_or_default();
+    let mut builder = ChangeBuilder::new(identity.clone(), key).intent(intent);
+    for h in &head.0 {
+        builder = builder.dep(mosaic_core::m1::change::ChangeId(*h));
+    }
+    for path in files {
+        let bytes = fs::read(path)?;
+        let kind = if std::str::from_utf8(&bytes).is_ok() {
+            FileKind::Text
+        } else {
+            FileKind::Binary
+        };
+        builder = builder.file(FileChange {
+            path: path.to_string_lossy().into_owned(),
+            kind,
+            patch: bytes,
+            conflicts: Vec::new(),
+        });
+    }
+    let change = builder.build()?;
+    let id = repo.commit(change)?;
+    repo.advance_branch(branch, id)?;
+    println!("committed {} on {branch}", &id.to_hex()[..16]);
+    Ok(())
+}
+
+fn put(path: &PathBuf) -> Result<(), AppError> {
+    let repo = open_here()?;
     let file = fs::File::open(path)?;
-    let manifest = chunk_and_store(&cas, file)?;
+    let manifest = chunk_and_store(repo.cas(), file)?;
     let encoded = bincode::serialize(&manifest).map_err(AppError::bincode)?;
-    let hash = cas.put(&encoded)?;
-    fs::write(manifest_dir.join(hash.to_hex()), &encoded)?;
+    let hash = repo.cas().put(&encoded)?;
     println!("{hash}");
     println!(
         "  {} bytes across {} chunks",
@@ -82,13 +222,13 @@ fn put(path: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-fn cat(hash_str: &str, out: Option<&Path>) -> Result<(), AppError> {
-    let (cas, _) = open_repo()?;
+fn cat(hash_str: &str, out: Option<&std::path::Path>) -> Result<(), AppError> {
+    let repo = open_here()?;
     let hash = Hash::from_hex(hash_str)?;
-    let manifest_bytes = cas.get(&hash)?;
+    let manifest_bytes = repo.cas().get(&hash)?;
     let manifest: Manifest =
         bincode::deserialize(&manifest_bytes).map_err(AppError::bincode)?;
-    let bytes = reassemble(&cas, &manifest)?;
+    let bytes = reassemble(repo.cas(), &manifest)?;
     match out {
         Some(p) => fs::write(p, bytes)?,
         None => io::Write::write_all(&mut io::stdout().lock(), &bytes)?,
@@ -97,40 +237,153 @@ fn cat(hash_str: &str, out: Option<&Path>) -> Result<(), AppError> {
 }
 
 fn stats() -> Result<(), AppError> {
-    let (cas, _) = open_repo()?;
-    let mut count = 0u64;
-    let mut bytes = 0u64;
-    for outer in fs::read_dir(cas.root())? {
+    let repo = open_here()?;
+    let mut blob_count = 0u64;
+    let mut blob_bytes = 0u64;
+    for outer in fs::read_dir(repo.cas().root())? {
         let outer = outer?;
         if !outer.file_type()?.is_dir() {
             continue;
         }
         for inner in fs::read_dir(outer.path())? {
             let inner = inner?;
-            count += 1;
-            bytes += inner.metadata()?.len();
+            blob_count += 1;
+            blob_bytes += inner.metadata()?.len();
         }
     }
-    println!("objects: {count}");
-    println!("on-disk bytes: {bytes}");
+    let change_count = repo.all_change_ids()?.len();
+    let branches = repo.refs().list()?.len();
+    println!("blobs:       {blob_count} ({blob_bytes} bytes on disk)");
+    println!("changes:     {change_count}");
+    println!("branches:    {branches}");
     Ok(())
 }
 
-fn open_repo() -> Result<(FsCas, PathBuf), AppError> {
-    let repo = Path::new(REPO_DIR);
-    if !repo.exists() {
-        return Err(AppError::Msg(format!(
-            "no {REPO_DIR}/ here; run `mos init` first"
-        )));
+fn demo() -> Result<(), AppError> {
+    println!("=== Mosaic parallel-merge demonstration ===");
+    println!();
+    println!("Three actors (a human and two AI agents) edit the same file");
+    println!("on independent branches; Mosaic merges all three cleanly without");
+    println!("text-marker conflicts, then surfaces remaining ambiguities as data.");
+    println!();
+
+    let base_text: &[&[u8]] = &[
+        b"# payments module",
+        b"",
+        b"function chargeCard(amount) {",
+        b"  return api.charge(amount);",
+        b"}",
+    ];
+    let creator = Hash::of(b"demo-root");
+    let base = LineGraph::from_lines(&creator, base_text);
+    print_graph("base", &base);
+
+    let anchor_blank = VertexId::derive(&creator, 1, base_text[1]);
+    let anchor_open = VertexId::derive(&creator, 2, base_text[2]);
+    let anchor_close = VertexId::derive(&creator, 4, base_text[4]);
+
+    let alice_vertex = make_vertex(b"alice-change", b"// Alice: log the call");
+    let alice_patch = Patch::from_ops(vec![Op::InsertAfter {
+        anchor: anchor_blank,
+        before: anchor_open,
+        vertex: alice_vertex,
+    }]);
+
+    let bob_vertex = make_vertex(b"bob-change", b"// Bob: track fraud score");
+    let bob_patch = Patch::from_ops(vec![Op::InsertAfter {
+        anchor: anchor_close,
+        before: base.sink_id(),
+        vertex: bob_vertex,
+    }]);
+
+    let carol_vertex = make_vertex(b"carol-change", b"// Carol: also annotate");
+    let carol_patch = Patch::from_ops(vec![Op::InsertAfter {
+        anchor: anchor_blank,
+        before: anchor_open,
+        vertex: carol_vertex,
+    }]);
+
+    println!("--- commutation checks ---");
+    println!(
+        "  alice vs bob  (disjoint regions)   -> commute = {}",
+        mosaic_core::m1_patch::merge::commute(&alice_patch, &bob_patch)
+    );
+    println!(
+        "  alice vs carol (same anchor slot)  -> commute = {}",
+        mosaic_core::m1_patch::merge::commute(&alice_patch, &carol_patch)
+    );
+    println!();
+
+    let merged_ab = three_way_merge(&base, &alice_patch, &bob_patch)?;
+    println!("--- merge: alice + bob (clean) ---");
+    print_graph("result", &merged_ab.graph);
+    println!(
+        "  {} conflicts (auto-resolved by commutation)",
+        merged_ab.conflicts.len()
+    );
+    println!();
+
+    let merged_ac = three_way_merge(&base, &alice_patch, &carol_patch)?;
+    println!("--- merge: alice + carol (concurrent insert at same slot) ---");
+    print_graph("result", &merged_ac.graph);
+    println!(
+        "  {} structured conflict(s) — repo is still valid:",
+        merged_ac.conflicts.len()
+    );
+    for c in &merged_ac.conflicts {
+        match c {
+            StructuredConflict::ConcurrentInsert { anchor, ours, theirs, .. } => {
+                println!(
+                    "    ConcurrentInsert at anchor {}: ours={}, theirs={}",
+                    short(&anchor.0),
+                    short(&ours.0),
+                    short(&theirs.0)
+                );
+            }
+            StructuredConflict::EditVsDelete { target, deleter, editor } => {
+                println!(
+                    "    EditVsDelete at {}: deleter={:?}, editor={:?}",
+                    short(&target.0),
+                    deleter,
+                    editor
+                );
+            }
+        }
     }
-    let cas = FsCas::open(repo.join(CAS_DIR))?;
-    Ok((cas, repo.join(MANIFEST_DIR)))
+    println!();
+    println!("Key property: the merged graph is a valid acyclic graph that flattens");
+    println!("to a deterministic total order. The conflict is data — an AI agent");
+    println!("can read it programmatically and decide which sibling to kill.");
+    Ok(())
+}
+
+fn print_graph(label: &str, graph: &LineGraph) {
+    println!("{label}:");
+    for line in graph.flatten() {
+        let txt = std::str::from_utf8(line).unwrap_or("<binary>");
+        println!("  {txt}");
+    }
+}
+
+fn make_vertex(creator_tag: &[u8], line: &[u8]) -> Vertex {
+    let creator = Hash::of(creator_tag);
+    Vertex {
+        id: VertexId::derive(&creator, 0, line),
+        bytes: line.to_vec(),
+        alive: true,
+    }
+}
+
+fn short(h: &Hash) -> String {
+    h.to_hex()[..8].to_string()
+}
+
+fn open_here() -> Result<Repository, AppError> {
+    Repository::open(std::env::current_dir()?).map_err(Into::into)
 }
 
 #[derive(Debug, thiserror::Error)]
 enum AppError {
-    #[error("{0}")]
-    Msg(String),
     #[error(transparent)]
     Core(#[from] mosaic_core::Error),
     #[error("io: {0}")]

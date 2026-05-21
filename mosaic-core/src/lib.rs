@@ -9,6 +9,7 @@ pub mod hash;
 pub mod m1;
 pub mod m1_dag;
 pub mod m1_patch;
+pub mod repo;
 pub mod storage;
 
 pub use error::Error;

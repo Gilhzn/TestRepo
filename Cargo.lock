@@ -485,6 +485,7 @@ version = "0.0.1"
 dependencies = [
  "bincode",
  "clap",
+ "hex",
  "mosaic-core",
  "thiserror",
 ]
