@@ -100,11 +100,33 @@ impl Policy {
         if self.is_open() {
             return Ok(());
         }
+
+        // Pre-verify each attestation in the bundle. An attestation is
+        // usable iff its invoker_pubkey is on the allowlist and the
+        // signature checks out.
+        let mut valid_attestations: Vec<&mosaic_core::attestation::Attestation> = Vec::new();
+        for att in &bundle.attestations {
+            if att.verify().is_err() {
+                continue;
+            }
+            if self.allows(&att.invoker_pubkey.to_bytes()) {
+                valid_attestations.push(att);
+            }
+        }
+
         for change in &bundle.changes {
             let pubkey = change.author_key.to_bytes();
-            if !self.allows(&pubkey) {
+            if self.allows(&pubkey) {
+                continue;
+            }
+            // Otherwise the change must be covered by a valid attestation.
+            let chain_ok = valid_attestations
+                .iter()
+                .any(|att| att.authorize(change).is_ok());
+            if !chain_ok {
                 return Err(format!(
-                    "change {}: author key {} is not on the allowlist",
+                    "change {}: author key {} is not on the allowlist and no \
+                     valid attestation from a trusted invoker covers it",
                     &change.id().to_hex()[..12],
                     hex::encode(pubkey)
                 ));
@@ -140,6 +162,69 @@ mod tests {
             .unwrap();
         let cid = repo.commit(change).unwrap();
         build_bundle(&repo, &[cid]).unwrap()
+    }
+
+    fn make_attested_bundle(
+        invoker_key: &SigningKey,
+        session_key: &SigningKey,
+    ) -> Bundle {
+        use mosaic_core::attestation::Attestation;
+        use mosaic_core::m1::change::Tai64N;
+
+        let dir = TempDir::new().unwrap();
+        let mut repo = Repository::init(dir.path()).unwrap();
+        let human = Identity::human("eyal@example.com", None).unwrap();
+        let agent = Identity::agent("claude-code", "sess-1", human).unwrap();
+
+        let now = Tai64N::now();
+        let valid_from = Tai64N(now.0 - 60, 0);
+        let valid_until = Tai64N(now.0 + 3600, 0);
+        let att = Attestation::issue(
+            agent.clone(),
+            session_key.verifying_key(),
+            valid_from,
+            valid_until,
+            invoker_key,
+        )
+        .unwrap();
+
+        let change = mosaic_core::m1::change::ChangeBuilder::new(agent, session_key.clone())
+            .ts(now)
+            .intent("via agent")
+            .file(FileChange {
+                path: "x".into(),
+                kind: FileKind::Text,
+                patch: b"x".to_vec(),
+                conflicts: Vec::new(),
+            })
+            .build()
+            .unwrap();
+        let cid = repo.commit(change).unwrap();
+        let bundle = build_bundle(&repo, &[cid]).unwrap();
+        bundle.with_attestation(att)
+    }
+
+    #[test]
+    fn attestation_allows_session_signed_change() {
+        let invoker_key = SigningKey::generate();
+        let session_key = SigningKey::generate();
+        let bundle = make_attested_bundle(&invoker_key, &session_key);
+
+        // Trust only the invoker's long-term key; the session key is NOT
+        // directly trusted, but the attestation should bridge it.
+        let policy = Policy::allowlist([invoker_key.verifying_key().to_bytes()]);
+        assert!(policy.authorize_bundle(&bundle).is_ok());
+    }
+
+    #[test]
+    fn attestation_from_untrusted_invoker_is_rejected() {
+        let invoker_key = SigningKey::generate(); // NOT on the allowlist
+        let session_key = SigningKey::generate();
+        let bundle = make_attested_bundle(&invoker_key, &session_key);
+
+        let other = SigningKey::generate();
+        let policy = Policy::allowlist([other.verifying_key().to_bytes()]);
+        assert!(policy.authorize_bundle(&bundle).is_err());
     }
 
     #[test]

@@ -26,6 +26,8 @@ pub struct Bundle {
     pub blobs: BTreeMap<Hash, Vec<u8>>,
     #[serde(default)]
     pub branch_advances: BTreeMap<String, Frontier>,
+    #[serde(default)]
+    pub attestations: Vec<crate::attestation::Attestation>,
 }
 
 impl Bundle {
@@ -35,11 +37,17 @@ impl Bundle {
             changes,
             blobs,
             branch_advances: BTreeMap::new(),
+            attestations: Vec::new(),
         }
     }
 
     pub fn with_branch_advance(mut self, name: impl Into<String>, frontier: Frontier) -> Self {
         self.branch_advances.insert(name.into(), frontier);
+        self
+    }
+
+    pub fn with_attestation(mut self, att: crate::attestation::Attestation) -> Self {
+        self.attestations.push(att);
         self
     }
 
