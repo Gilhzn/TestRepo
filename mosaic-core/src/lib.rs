@@ -23,6 +23,7 @@ pub mod attestation;
 pub mod working_copy;
 pub mod gc;
 pub mod audit;
+pub mod git_export;
 
 pub use error::Error;
 pub use hash::Hash;

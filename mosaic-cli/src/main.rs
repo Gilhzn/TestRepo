@@ -184,6 +184,12 @@ enum Cmd {
     /// Audit log: query everything done by an actor or session.
     #[command(subcommand)]
     Audit(AuditCmd),
+    /// Export a branch's history to a Git repository (one-way mirror).
+    ExportGit {
+        target: PathBuf,
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -330,6 +336,7 @@ fn main() -> ExitCode {
         Cmd::Audit(AuditCmd::Actor { actor_id }) => run(|| audit_actor(&actor_id)),
         Cmd::Audit(AuditCmd::Sessions) => run(audit_sessions),
         Cmd::Audit(AuditCmd::All) => run(audit_all),
+        Cmd::ExportGit { target, branch } => run(|| export_git_cmd(&target, &branch)),
     }
 }
 
@@ -1488,6 +1495,24 @@ fn squash_cmd(branch: &str) -> Result<(), AppError> {
         &tip.to_hex()[..12],
         &new_id.to_hex()[..12]
     );
+    Ok(())
+}
+
+fn export_git_cmd(target: &PathBuf, branch: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    println!("exporting branch {branch} to {}...", target.display());
+    let report = mosaic_core::git_export::export(&repo, branch, target)?;
+    println!(
+        "exported {} change(s); head -> {}",
+        report.commits_written.len(),
+        report.head_git_sha.as_deref().unwrap_or("(none)")
+    );
+    for (mid, gsha) in report.commits_written.iter().take(20) {
+        println!("  {} -> {}", &mid.to_hex()[..12], &gsha[..12]);
+    }
+    if report.commits_written.len() > 20 {
+        println!("  ... and {} more", report.commits_written.len() - 20);
+    }
     Ok(())
 }
 
