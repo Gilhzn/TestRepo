@@ -186,4 +186,16 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
   poll returns only changes landed since you last looked (per-branch seen
   frontier), the "tell me when X lands on main" without a long-lived conn
 
-## Current test count: **275 Rust + 6 TypeScript + 6 Python = 287 / 287 passing**
+- ✅ Sparse checkout (`mosaic-core::sparse`) — `mos sparse set/show/clear`
+  + `mos checkout`; include/exclude globs, only matching paths materialized
+  (monorepo support)
+
+## Documentation + CI (NEW)
+- ✅ `docs/ARCHITECTURE.md` — layer-by-layer deep dive + data-flow trace
+- ✅ `docs/OPERATIONS.md` — operator runbook (deploy, auth, keys, backup,
+  gc, monitoring, webhooks, disaster recovery)
+- ✅ `docs/SECURITY.md` — threat model, attestation chain, encryption,
+  audit/rollback, and an honest known-gaps section
+- ✅ `.github/workflows/ci.yml` — Rust workspace + TS + Python jobs
+
+## Current test count: **284 Rust + 6 TypeScript + 6 Python = 296 / 296 passing**
