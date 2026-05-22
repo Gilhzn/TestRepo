@@ -162,6 +162,26 @@ fn short(h: &Hash) -> String {
     h.to_hex()[..8].to_string()
 }
 
+pub use crate::m1_patch::merge::ResolveStrategy;
+
+/// Three-way merge a file and deterministically resolve every conflict with
+/// `strategy`, returning the resolved file as a single string.
+pub fn resolve_text_file(
+    creator: &Hash,
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    strategy: ResolveStrategy,
+) -> Result<String> {
+    let result = patch_merge(creator, base, ours, theirs)?;
+    let lines = result.resolve(strategy)?;
+    let mut out: String = lines.into_iter().map(|l| format!("{l}\n")).collect();
+    if !out.ends_with('\n') && !out.is_empty() {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 pub fn merge_text_file(
     creator: &Hash,
     lang: Option<Lang>,
@@ -333,6 +353,30 @@ mod tests {
         );
         assert!(explanation.contains("chargeCard → processCharge"));
         assert!(explanation.contains("callsite"));
+    }
+
+    #[test]
+    fn resolve_ours_keeps_local_on_concurrent_insert() {
+        // Both sides insert a different line at the same anchor.
+        let base = "alpha\nbeta\n";
+        let ours = "alpha\nOURS_LINE\nbeta\n";
+        let theirs = "alpha\nTHEIRS_LINE\nbeta\n";
+        let creator = Hash::of(b"resolve-1");
+
+        let ours_resolved =
+            resolve_text_file(&creator, base, ours, theirs, ResolveStrategy::Ours).unwrap();
+        assert!(ours_resolved.contains("OURS_LINE"));
+        assert!(!ours_resolved.contains("THEIRS_LINE"));
+
+        let theirs_resolved =
+            resolve_text_file(&creator, base, ours, theirs, ResolveStrategy::Theirs).unwrap();
+        assert!(theirs_resolved.contains("THEIRS_LINE"));
+        assert!(!theirs_resolved.contains("OURS_LINE"));
+
+        let union =
+            resolve_text_file(&creator, base, ours, theirs, ResolveStrategy::Union).unwrap();
+        assert!(union.contains("OURS_LINE"));
+        assert!(union.contains("THEIRS_LINE"));
     }
 
     #[test]

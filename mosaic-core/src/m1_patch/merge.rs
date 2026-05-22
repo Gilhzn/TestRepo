@@ -38,6 +38,56 @@ pub struct MergeResult {
     pub conflicts: Vec<StructuredConflict>,
 }
 
+/// How to deterministically resolve the structured conflicts in a
+/// `MergeResult` into a single concrete file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolveStrategy {
+    /// Keep the local side's contribution; drop the remote's on conflict.
+    Ours,
+    /// Keep the remote side's contribution; drop the local's on conflict.
+    Theirs,
+    /// Keep both (the default merged graph already does this).
+    Union,
+}
+
+impl MergeResult {
+    /// Apply a resolution strategy to every structured conflict, mutating
+    /// the graph (killing the losing side's vertices / resurrecting an
+    /// edited-then-deleted line for `Ours`/`Theirs`), and return the
+    /// resolved lines.
+    pub fn resolve(mut self, strategy: ResolveStrategy) -> Result<Vec<String>> {
+        for c in &self.conflicts {
+            match c {
+                StructuredConflict::ConcurrentInsert { ours, theirs, .. } => match strategy {
+                    ResolveStrategy::Ours => {
+                        let _ = self.graph.set_alive(theirs, false);
+                    }
+                    ResolveStrategy::Theirs => {
+                        let _ = self.graph.set_alive(ours, false);
+                    }
+                    ResolveStrategy::Union => {}
+                },
+                StructuredConflict::EditVsDelete { target, deleter, .. } => {
+                    // Ours/Theirs decide whether the deletion or the edit wins.
+                    let keep_alive = match (strategy, deleter) {
+                        (ResolveStrategy::Ours, PatchSide::Theirs) => true, // ours edited
+                        (ResolveStrategy::Theirs, PatchSide::Ours) => true,
+                        (ResolveStrategy::Union, _) => true,
+                        _ => false,
+                    };
+                    let _ = self.graph.set_alive(target, keep_alive);
+                }
+            }
+        }
+        Ok(self
+            .graph
+            .flatten()
+            .into_iter()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect())
+    }
+}
+
 /// Two patches commute iff their op sets touch disjoint sets of vertices
 /// AND neither's inserts anchor on a vertex that the other inserts/kills.
 ///

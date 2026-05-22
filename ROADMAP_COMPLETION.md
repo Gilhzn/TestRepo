@@ -25,8 +25,9 @@ Features every developer reaches for that Mosaic doesn't have yet.
 - ✅ **Reflog** — `mos reflog` over an append-only ref-movement log (6 tests).
 - ✅ **Short-hash prefixes** — every change-id arg resolves Git-style
   prefixes against the repo (ambiguity-checked).
-- ⬜ **Conflict resolution** — `mos resolve <change>` to inspect structured
-  conflicts and pick a side / write a resolution change; web UI affordance.
+- ✅ **Conflict resolution** — `mos resolve <file> --base --ours --theirs
+  --strategy ours|theirs|union`; `MergeResult::resolve` kills the losing
+  side's vertices and re-flattens (1 test).
 - ✅ **Hooks** (`mosaic-core::hooks`) — pre-commit/post-commit (+ generic
   pre-/post-) from `.mosaic/hooks/`; pre-hooks gate, post-hooks advisory,
   env context; wired into `mos commit` (6 tests).
@@ -38,10 +39,13 @@ Features every developer reaches for that Mosaic doesn't have yet.
   bridge to SemanticHint (8 tests).
 - ✅ **`mos bisect start/good/bad/status/reset`** — binary-search the change
   DAG for a regression, state persisted in `.mosaic/bisect.json` (6 tests).
-- ⬜ **Server push notifications (SSE)** — `/api/v1/events` server-sent
-  stream so clients learn of pushes without polling.
-- ⬜ **Packfiles** — pack many loose changes/blobs into a single
-  compressed file for efficient bulk transfer + cold storage.
+- ✅ **Server push notifications (SSE)** — `GET /api/v1/events` server-sent
+  stream; post_bundle publishes a `{type:push,branch,tips,applied}` event to
+  every subscriber (1 integration test).
+- ✅ **Packfiles** (`mosaic-core::pack`) — whole-repo zstd-19 archive with a
+  hash→(kind,offset,len) index; `mos pack create/restore/inspect` (5 tests).
+
+**M8 + M9 are now complete.** Remaining gaps are all non-code.
 
 ## Non-code (tracked, out of engine scope)
 - ⬜ Dogfooding with a real team · Hosting / "Mosaic Cloud" · external
@@ -49,4 +53,4 @@ Features every developer reaches for that Mosaic doesn't have yet.
 
 ---
 
-## Current test count: **343 / 343 passing** (331 Rust + 6 TS + 6 Python)
+## Current test count: **355 / 355 passing** (343 Rust + 6 TS + 6 Python)

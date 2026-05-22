@@ -51,6 +51,8 @@ pub struct AppState {
     pub live: Arc<ws::LiveState>,
     pub presence: Arc<awareness::PresenceState>,
     pub signaling: Arc<signaling::SignalingState>,
+    /// Broadcast channel for server-sent push events.
+    pub events: tokio::sync::broadcast::Sender<String>,
 }
 
 impl AppState {
@@ -58,6 +60,7 @@ impl AppState {
         let repo_root = repo_root.into();
         let policy = auth::Policy::load(&repo_root).unwrap_or_default();
         let rules = protection::ProtectionRules::load(&repo_root).unwrap_or_default();
+        let (events, _) = tokio::sync::broadcast::channel(256);
         Self {
             repo_root,
             lock: Mutex::new(()),
@@ -66,12 +69,14 @@ impl AppState {
             live: Arc::new(ws::LiveState::new()),
             presence: Arc::new(awareness::PresenceState::new()),
             signaling: Arc::new(signaling::SignalingState::new()),
+            events,
         }
     }
 
     pub fn with_policy(repo_root: impl Into<PathBuf>, policy: auth::Policy) -> Self {
         let repo_root = repo_root.into();
         let rules = protection::ProtectionRules::load(&repo_root).unwrap_or_default();
+        let (events, _) = tokio::sync::broadcast::channel(256);
         Self {
             repo_root,
             lock: Mutex::new(()),
@@ -80,6 +85,7 @@ impl AppState {
             live: Arc::new(ws::LiveState::new()),
             presence: Arc::new(awareness::PresenceState::new()),
             signaling: Arc::new(signaling::SignalingState::new()),
+            events,
         }
     }
 
@@ -111,6 +117,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/issues/:number", get(get_issue))
         .route("/api/v1/issues/:number/events", post(post_issue_event))
         .route("/api/v1/live-stats", get(live_stats))
+        .route("/api/v1/events", get(events_sse))
         .route("/ws/doc/:name", get(ws::ws_handler))
         .route("/ws/awareness/:name", get(awareness::awareness_handler))
         .route("/ws/signal/:name", get(signaling::signaling_handler))
@@ -401,6 +408,25 @@ async fn index_html() -> impl IntoResponse {
 
 const INDEX_HTML: &str = include_str!("index.html");
 
+/// Server-sent event stream of push events. Clients `GET /api/v1/events`
+/// and receive `data: {json}\n\n` frames whenever a push lands — the
+/// long-lived complement to the pull-based `mos watch poll`.
+async fn events_sse(
+    State(s): State<Arc<AppState>>,
+) -> axum::response::Sse<impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>
+{
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_util::StreamExt;
+    let rx = s.events.subscribe();
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|msg| async move {
+        match msg {
+            Ok(json) => Some(Ok(Event::default().data(json))),
+            Err(_) => None, // lagged; skip
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
 async fn landing_html() -> impl IntoResponse {
     (
         [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -516,6 +542,15 @@ async fn post_bundle(
             skipped: skipped.clone(),
         };
         webhooks::fire(&webhook_config, &event);
+        // Also publish to the SSE event stream (best-effort).
+        let sse_json = serde_json::json!({
+            "type": "push",
+            "branch": branch,
+            "tips": frontier.0.iter().map(|h| h.to_hex()).collect::<Vec<_>>(),
+            "applied": applied,
+        })
+        .to_string();
+        let _ = s.events.send(sse_json);
     }
 
     Ok(Json(ApplyResponse { applied, skipped }))
@@ -1573,6 +1608,68 @@ mod tests {
         // Nothing was persisted.
         let listed: Vec<IssueSummary> = reqwest::get(&url).await.unwrap().json().await.unwrap();
         assert!(listed.is_empty());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn sse_emits_push_event() {
+        use futures_util::StreamExt;
+
+        let server_dir = TempDir::new().unwrap();
+        let _ = Repository::init(server_dir.path()).unwrap();
+        let (addr, handle) =
+            serve(server_dir.path(), "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let base = format!("http://{addr}");
+
+        // Open the SSE stream first.
+        let resp = reqwest::Client::new()
+            .get(format!("{base}/api/v1/events"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert!(resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("text/event-stream"));
+        let mut stream = resp.bytes_stream();
+
+        // Give the subscription a moment to register, then push.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (idn, key) = human();
+        let bundle = {
+            let bundle_dir = TempDir::new().unwrap();
+            let mut repo = Repository::init(bundle_dir.path()).unwrap();
+            let cid = one_commit(&mut repo, &idn, &key, "via-sse");
+            mosaic_core::sync::build_bundle_for_branch(&repo, "main", &[cid]).unwrap()
+        };
+        reqwest::Client::new()
+            .post(format!("{base}/api/v1/bundle"))
+            .body(bundle.encode().unwrap())
+            .send()
+            .await
+            .unwrap();
+
+        // Read until we see a push event.
+        let got = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut buf = String::new();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.unwrap();
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+                if buf.contains("\"type\":\"push\"") {
+                    return buf.clone();
+                }
+            }
+            buf
+        })
+        .await
+        .unwrap();
+        assert!(got.contains("\"type\":\"push\""), "no push event seen: {got}");
+        assert!(got.contains("\"branch\":\"main\""));
 
         handle.abort();
     }

@@ -245,6 +245,21 @@ enum Cmd {
     /// Pack the whole repo into one compressed archive / restore from one.
     #[command(subcommand)]
     Pack(PackCmd),
+    /// Three-way merge a file and resolve conflicts with a fixed strategy.
+    Resolve {
+        path: String,
+        #[arg(long)]
+        base: PathBuf,
+        #[arg(long)]
+        ours: PathBuf,
+        #[arg(long)]
+        theirs: PathBuf,
+        /// ours | theirs | union
+        #[arg(long, default_value = "union")]
+        strategy: String,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -582,7 +597,52 @@ fn main() -> ExitCode {
         Cmd::Pack(PackCmd::Create { out }) => run(|| pack_create_cmd(&out)),
         Cmd::Pack(PackCmd::Restore { path }) => run(|| pack_restore_cmd(&path)),
         Cmd::Pack(PackCmd::Inspect { path }) => run(|| pack_inspect_cmd(&path)),
+        Cmd::Resolve {
+            path,
+            base,
+            ours,
+            theirs,
+            strategy,
+            out,
+        } => run(|| resolve_cmd(&path, &base, &ours, &theirs, &strategy, out.as_deref())),
     }
+}
+
+fn resolve_cmd(
+    path: &str,
+    base: &PathBuf,
+    ours: &PathBuf,
+    theirs: &PathBuf,
+    strategy: &str,
+    out: Option<&std::path::Path>,
+) -> Result<(), AppError> {
+    use mosaic_core::merge_strategies::ResolveStrategy;
+    let strat = match strategy {
+        "ours" => ResolveStrategy::Ours,
+        "theirs" => ResolveStrategy::Theirs,
+        "union" => ResolveStrategy::Union,
+        other => {
+            return Err(AppError::Msg(format!(
+                "unknown strategy {other:?}; use ours|theirs|union"
+            )))
+        }
+    };
+    let base_s = fs::read_to_string(base)?;
+    let ours_s = fs::read_to_string(ours)?;
+    let theirs_s = fs::read_to_string(theirs)?;
+    let creator = Hash::of(path.as_bytes());
+    let resolved =
+        mosaic_core::merge_strategies::resolve_text_file(&creator, &base_s, &ours_s, &theirs_s, strat)?;
+    match out {
+        Some(p) => {
+            fs::write(p, &resolved)?;
+            println!("wrote resolved {path} ({strategy}) to {}", p.display());
+        }
+        None => {
+            print!("{resolved}");
+        }
+    }
+    Ok(())
 }
 
 fn pack_create_cmd(out: &PathBuf) -> Result<(), AppError> {
