@@ -360,16 +360,66 @@ Test: `crdt::three_peers_converge_then_compile_and_late_join` (plus the existing
 | 3 | semantic merge / rename | `flatten` ordered concurrent edits by content hash → scrambled code |
 | 4 | large / binary files | none (integrity + dedup + binary merge all correct) |
 | 5 | real-time CRDT collab | none (3-peer convergence + session→patch + late-join all correct) |
+| 6 | **the frontier**: semantic *resolution* | built it — auto-rewrites call sites after a rename |
 
 **All four founding pillars are now dogfood-validated:** clean parallel merges,
-real-time collaboration, semantic *detection*, and large files. The last two
-rounds found no defects, suggesting the core has stabilized.
-
-The one open frontier remains semantic *resolution* (auto-applying a rename
-across call sites) — known, documented, and deliberately left as a real project
-rather than a hack. Everything else a developer or agent reaches for in these
-five scenarios now works end to end.
+real-time collaboration, semantic detection+resolution, and large files.
 
 Test suite after round 5: **374** (362 Rust + 6 TS + 6 Python).
+
+---
+
+## Round 6 (2026-05-22): the frontier — semantic *resolution*
+
+The open frontier from rounds 3–5 was that semantic merge *detected* renames
+and *hinted* at stale call sites but didn't **rewrite** them. Built it (with
+three workers in parallel: an AST rewrite engine, an 8-language test matrix, and
+the merge/CLI integration).
+
+### What landed
+
+- **AST rewrite engine** (`mosaic-core/src/rename_rewrite.rs`):
+  `apply_renames(lang, source, &[(from,to)]) -> (text, count)` rewrites only
+  genuine identifier *leaf* tokens via tree-sitter — never strings, comments, or
+  substrings of a longer identifier (`charge_card_fee` is safe). Ambiguous
+  renames are dropped. Verified across all 8 languages
+  (`tests/rename_rewrite_matrix.rs`, 8/8).
+- **Merge integration:** `FileMerge` now carries `resolved: Option<String>` —
+  the merged text with the other side's lingering call sites of a renamed symbol
+  rewritten to the new name — plus a `renames_applied` count, surfaced in
+  `--explain`.
+- **CLI:** `mos merge --apply-renames` emits the resolved file.
+
+### The T5 scenario, now delivered
+
+Agent A renames `charge_card → stripe_charge`; agent B concurrently adds
+`def refund(x): return charge_card(x)`. `mos merge --apply-renames`:
+
+```
+def stripe_charge(amount):
+    return amount
+
+def process():
+    return stripe_charge(100)
+
+def refund():
+    return stripe_charge(50)   # ← call site auto-rewritten from charge_card
+```
+
+Valid Python, zero `charge_card` remaining — the renamed symbol's call sites are
+realigned automatically, not just flagged. Tests:
+`merge_strategies::rename_is_resolved_into_lingering_call_sites`,
+`cli::merge_apply_renames_rewrites_call_sites`.
+
+### Honest scope
+
+This handles the common case (a renamed symbol; rewrite its identifier tokens in
+the merged file) and is opt-in (`--apply-renames`) so it never surprises. It is
+not full scope/shadowing analysis — if two different symbols share a name in
+different scopes, the rewrite is name-based, not binding-aware. That deeper
+scope-aware resolution is the next increment; the headline rename-follows-merge
+behavior now works end to end across all eight languages.
+
+Test suite after round 6: **390** (378 Rust + 6 TS + 6 Python).
 
 Test suite after round 2: **371** (359 Rust + 6 TS + 6 Python).

@@ -28,6 +28,14 @@ pub struct FileMerge {
     pub patch_conflicts: Vec<StructuredConflict>,
     pub semantic_hints: Vec<SemanticHint>,
     pub renames: Vec<(String, String)>,
+    /// Semantic resolution: the merged text with detected renames applied to
+    /// lingering call sites (the other side's references to the old name
+    /// rewritten to the new one). `Some` only when a known language + at least
+    /// one rename produced at least one rewrite. `merged_lines` is left as the
+    /// raw union; callers opt into `resolved`.
+    pub resolved: Option<String>,
+    /// Number of identifier tokens rewritten to produce `resolved`.
+    pub renames_applied: usize,
 }
 
 impl FileMerge {
@@ -85,6 +93,15 @@ impl FileMerge {
                 s.push_str(&format!("  • {from} → {to}\n"));
             }
             s.push('\n');
+        }
+
+        // Semantic resolution (auto-rewritten call sites)
+        if self.renames_applied > 0 {
+            s.push_str(&format!(
+                "Semantic resolution: rewrote {} call site(s) of renamed symbols to the \
+                 new name (pass --apply-renames to write the resolved file).\n\n",
+                self.renames_applied
+            ));
         }
 
         // Semantic hints
@@ -211,11 +228,28 @@ pub fn merge_text_file(
         None => (Vec::new(), Vec::new()),
     };
 
+    // Semantic resolution: apply the detected renames to any lingering call
+    // sites in the merged text (the other side's references to the old name).
+    let (resolved, renames_applied) = match lang {
+        Some(l) if !renames.is_empty() => {
+            let merged_text: String = merged_lines.iter().map(|l| format!("{l}\n")).collect();
+            let (text, n) = crate::rename_rewrite::apply_renames(l, &merged_text, &renames);
+            if n > 0 {
+                (Some(text), n)
+            } else {
+                (None, 0)
+            }
+        }
+        _ => (None, 0),
+    };
+
     Ok(FileMerge {
         merged_lines,
         patch_conflicts,
         semantic_hints,
         renames,
+        resolved,
+        renames_applied,
     })
 }
 
@@ -442,6 +476,36 @@ mod tests {
             matches!((xi, yi), (Some(x), Some(y)) if x < y),
             "expected XXX before YYY (document order), got {lines:?}"
         );
+    }
+
+    #[test]
+    fn rename_is_resolved_into_lingering_call_sites() {
+        // ours renames charge_card -> stripe_charge; theirs concurrently adds a
+        // caller of the OLD name. The raw union still calls charge_card; the
+        // `resolved` output rewrites that lingering call site to the new name.
+        let base = "def charge_card(x):\n    return x\n";
+        let ours = "def stripe_charge(x):\n    return x\n";
+        let theirs =
+            "def charge_card(x):\n    return x\n\n\ndef refund(x):\n    return charge_card(x)\n";
+        let creator = Hash::of(b"resolve-rename");
+        let fm = merge_text_file(&creator, Some(Lang::Python), base, ours, theirs).unwrap();
+        assert!(
+            fm.renames.iter().any(|(f, t)| f == "charge_card" && t == "stripe_charge"),
+            "rename not detected: {:?}",
+            fm.renames
+        );
+        let resolved = fm
+            .resolved
+            .expect("expected a semantically resolved output for a rename merge");
+        assert!(
+            resolved.contains("stripe_charge(x)"),
+            "lingering call site was not rewritten:\n{resolved}"
+        );
+        assert!(
+            !resolved.contains("charge_card"),
+            "old name still present after resolution:\n{resolved}"
+        );
+        assert!(fm.renames_applied >= 1);
     }
 
     #[test]

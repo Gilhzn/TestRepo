@@ -134,3 +134,40 @@ fn branch_merge_keeps_concurrent_blocks_valid() {
     let bodies = merged.matches("print(compute())").count();
     assert_eq!(bodies, 2, "a block was left bodyless:\n{merged}");
 }
+
+/// `mos merge --apply-renames`: one side renames a function, the other adds a
+/// caller of the old name. The resolved output must auto-rewrite that call site
+/// to the new name (semantic resolution, not just a hint).
+#[test]
+fn merge_apply_renames_rewrites_call_sites() {
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    write(&d.join("base.py"), "def charge_card(x):\n    return x\n");
+    write(&d.join("ours.py"), "def stripe_charge(x):\n    return x\n");
+    write(
+        &d.join("theirs.py"),
+        "def charge_card(x):\n    return x\n\n\ndef refund(x):\n    return charge_card(x)\n",
+    );
+    let out = d.join("resolved.py");
+    mos(
+        d,
+        &[
+            "merge",
+            "--base", "base.py",
+            "--ours", "ours.py",
+            "--theirs", "theirs.py",
+            "--apply-renames",
+            "--out", out.to_str().unwrap(),
+            "pay.py",
+        ],
+    );
+    let resolved = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        resolved.contains("return stripe_charge(x)"),
+        "call site was not rewritten to the new name:\n{resolved}"
+    );
+    assert!(
+        !resolved.contains("charge_card"),
+        "old name still present after --apply-renames:\n{resolved}"
+    );
+}

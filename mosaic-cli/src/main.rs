@@ -108,6 +108,11 @@ enum Cmd {
         /// Print a human-readable explanation of strategy + outcome.
         #[arg(long)]
         explain: bool,
+        /// Apply detected renames to lingering call sites (semantic resolution):
+        /// emit the merged file with the other side's references to a renamed
+        /// symbol rewritten to the new name.
+        #[arg(long)]
+        apply_renames: bool,
     },
     /// Run an end-to-end demo of two agents editing in parallel and merging cleanly.
     Demo,
@@ -535,7 +540,8 @@ fn main() -> ExitCode {
             theirs,
             out,
             explain,
-        } => run(|| merge_cmd(&path, &base, &ours, &theirs, out.as_deref(), explain)),
+            apply_renames,
+        } => run(|| merge_cmd(&path, &base, &ours, &theirs, out.as_deref(), explain, apply_renames)),
         Cmd::Demo => run(demo),
         Cmd::Comment {
             change_id,
@@ -1795,6 +1801,7 @@ fn merge_cmd(
     theirs: &PathBuf,
     out: Option<&std::path::Path>,
     explain: bool,
+    apply_renames: bool,
 ) -> Result<(), AppError> {
     let base_s = fs::read_to_string(base)?;
     let ours_s = fs::read_to_string(ours)?;
@@ -1805,11 +1812,22 @@ fn merge_cmd(
         &creator, lang, &base_s, &ours_s, &theirs_s,
     )?;
 
-    let merged: String = result
-        .merged_lines
-        .iter()
-        .map(|l| format!("{l}\n"))
-        .collect();
+    // With --apply-renames, emit the semantically-resolved text (call sites of
+    // renamed symbols rewritten to the new name) when the engine produced one.
+    let merged: String = match (apply_renames, &result.resolved) {
+        (true, Some(resolved)) => resolved.clone(),
+        _ => result
+            .merged_lines
+            .iter()
+            .map(|l| format!("{l}\n"))
+            .collect(),
+    };
+    if apply_renames && result.renames_applied > 0 {
+        eprintln!(
+            "applied {} rename rewrite(s) to call sites",
+            result.renames_applied
+        );
+    }
     match out {
         Some(p) => {
             fs::write(p, &merged)?;

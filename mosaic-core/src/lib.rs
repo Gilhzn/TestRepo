@@ -38,6 +38,7 @@ pub mod tags;
 pub mod gumtree;
 pub mod hooks;
 pub mod pack;
+pub mod rename_rewrite;
 
 pub use error::Error;
 pub use hash::Hash;
