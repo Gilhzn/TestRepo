@@ -161,6 +161,27 @@ The two **critical** findings (#1 and #2 above) are now fixed and regression-tes
    one tip's bytes and are flagged for manual review. Test:
    `working_copy::checkout_merges_concurrent_same_file_edits_across_tips`.
 
-The remaining gaps (#3 `mos clone`/branch-level merge, #4 bundle-default branch
-refs, #5 `commit -m` alias) are ergonomics, not correctness, and are still open.
-Test suite: **368** (356 Rust + 6 TS + 6 Python).
+### Ergonomics gaps (#3–#5) — also fixed
+
+3. **`mos clone` + branch-level merge — ADDED.** `mos clone <source> [dir]`
+   clones into a fresh directory from either a bundle file (init + apply +
+   checkout) or a remote URL (init + remote add + pull every branch +
+   checkout). `mos branch merge <sources>... --into <target>` unions the source
+   frontiers into the target and reports the auto-merge (reusing the merge-aware
+   checkout), so combining parallel agents' branches is one command.
+4. **`bundle create` default now carries branch refs.** A whole-repo
+   `bundle create` (no `-b`) includes every branch advance, so a fresh repo that
+   applies it can immediately `checkout` — no more silent zero-file seed.
+5. **`commit -m` / `--message` alias + `add` lists files.** Git muscle memory
+   works (`-m`/`--message` alias `--intent`/`-i`), and `mos add` now prints the
+   staged paths.
+
+Coverage: CLI integration tests (`mosaic-cli/tests/cli.rs`) drive the real `mos`
+binary through clone-from-bundle and a two-branch `branch merge`. Bundle clone
+and branch merge are verified end-to-end; network clone's non-network steps are
+verified (a live end-to-end network clone wasn't run because the sandbox would
+not keep a background server alive).
+
+**Every finding from the dogfood run — both criticals and all three
+ergonomics gaps — is now addressed.** Test suite: **370** (358 Rust + 6 TS +
+6 Python).

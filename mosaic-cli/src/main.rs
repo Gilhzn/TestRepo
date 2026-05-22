@@ -27,6 +27,14 @@ struct Cli {
 enum Cmd {
     /// Create a fresh Mosaic repository in the current directory.
     Init,
+    /// Clone a repository into a new directory, from a bundle file or a remote
+    /// URL. (Seeds the repo, pulls/applies its branches, and checks one out.)
+    Clone {
+        /// A bundle file path, or a remote server URL (e.g. http://host:7700).
+        source: String,
+        /// Target directory (defaults to a name derived from the source).
+        dir: Option<String>,
+    },
     /// Manage the local identity (human or agent).
     #[command(subcommand)]
     Id(IdCmd),
@@ -37,7 +45,9 @@ enum Cmd {
     Branch(BranchCmd),
     /// Record a new change against the current head.
     Commit {
-        #[arg(short, long)]
+        /// What this change accomplishes. `-m`/`--message` work as aliases for
+        /// Git muscle memory.
+        #[arg(short = 'i', long = "intent", visible_short_alias = 'm', visible_alias = "message")]
         intent: String,
         #[arg(short, long)]
         file: Vec<PathBuf>,
@@ -471,16 +481,29 @@ enum BranchCmd {
     List,
     /// Show the frontier of a branch as a list of change hashes.
     Show { name: String },
+    /// Merge one or more branches into a target branch by unioning their
+    /// frontiers. Divergent files are 3-way merged when the target is checked
+    /// out (conflicts surface as data; nothing is dropped).
+    Merge {
+        /// Source branch name(s) to merge in.
+        #[arg(required = true)]
+        sources: Vec<String>,
+        /// Target branch to advance (created if it doesn't exist).
+        #[arg(long, default_value = "main")]
+        into: String,
+    },
 }
 
 fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Init => run(init),
+        Cmd::Clone { source, dir } => run(|| clone_cmd(&source, dir.as_deref())),
         Cmd::Id(IdCmd::Show) => run(id_show),
         Cmd::Id(IdCmd::Setup { email, name }) => run(|| id_setup(&email, name.as_deref())),
         Cmd::Log => run(log),
         Cmd::Branch(BranchCmd::List) => run(branch_list),
         Cmd::Branch(BranchCmd::Show { name }) => run(|| branch_show(&name)),
+        Cmd::Branch(BranchCmd::Merge { sources, into }) => run(|| branch_merge(&sources, &into)),
         Cmd::Commit {
             intent,
             file,
@@ -1101,6 +1124,147 @@ fn init() -> Result<(), AppError> {
     Ok(())
 }
 
+fn clone_cmd(source: &str, dir: Option<&str>) -> Result<(), AppError> {
+    let is_file = std::path::Path::new(source).is_file();
+    let target = match dir {
+        Some(d) => PathBuf::from(d),
+        None => PathBuf::from(default_clone_dir(source, is_file)),
+    };
+    if target.exists()
+        && target
+            .read_dir()
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false)
+    {
+        return Err(AppError::Msg(format!(
+            "target {} already exists and is not empty",
+            target.display()
+        )));
+    }
+    fs::create_dir_all(&target)?;
+    // Resolve the bundle path while we're still in the original cwd.
+    let abs_bundle = if is_file {
+        Some(fs::canonicalize(source)?)
+    } else {
+        None
+    };
+    std::env::set_current_dir(fs::canonicalize(&target)?)?;
+
+    init()?;
+    match abs_bundle {
+        Some(bundle_path) => bundle_apply(&bundle_path)?,
+        None => {
+            remote_add("origin", source)?;
+            let branches = remote_branch_names(source)?;
+            if branches.is_empty() {
+                return Err(AppError::Msg("remote has no branches to clone".into()));
+            }
+            for b in &branches {
+                pull_cmd("origin", b)?;
+            }
+        }
+    }
+
+    // Check out a branch: prefer `main`, else the first available.
+    let repo = open_here()?;
+    let mut names = repo.refs().list()?;
+    drop(repo);
+    if names.is_empty() {
+        println!("cloned into {} (no branches to check out)", target.display());
+        return Ok(());
+    }
+    names.sort();
+    let branch = if names.iter().any(|n| n == "main") {
+        "main".to_string()
+    } else {
+        names[0].clone()
+    };
+    checkout_cmd(&branch)?;
+    println!("cloned into {}", target.display());
+    Ok(())
+}
+
+fn default_clone_dir(source: &str, is_file: bool) -> String {
+    let name = if is_file {
+        std::path::Path::new(source)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("mosaic-clone")
+    } else {
+        source
+            .trim_end_matches('/')
+            .rsplit('/')
+            .find(|s| !s.is_empty())
+            .unwrap_or("mosaic-clone")
+    };
+    name.trim_end_matches(".git").to_string()
+}
+
+fn remote_branch_names(base_url: &str) -> Result<Vec<String>, AppError> {
+    let url = format!("{}/api/v1/branches", base_url.trim_end_matches('/'));
+    let resp = reqwest::blocking::Client::new()
+        .get(&url)
+        .send()
+        .map_err(|e| AppError::Msg(format!("clone: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(AppError::Msg(format!(
+            "clone: branch list failed: {}",
+            resp.status()
+        )));
+    }
+    let vals: Vec<serde_json::Value> = resp
+        .json()
+        .map_err(|e| AppError::Msg(format!("clone: bad branch list: {e}")))?;
+    Ok(vals
+        .iter()
+        .filter_map(|v| v["name"].as_str().map(String::from))
+        .collect())
+}
+
+fn branch_merge(sources: &[String], into: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let mut tips: Vec<mosaic_core::Hash> = Vec::new();
+    for s in sources {
+        let f = repo
+            .refs()
+            .get(s)
+            .map_err(|_| AppError::Msg(format!("no such branch: {s}")))?;
+        tips.extend(f.0.iter().copied());
+    }
+    for tip in &tips {
+        repo.advance_branch(into, mosaic_core::m1::change::ChangeId(*tip))?;
+    }
+    let frontier = repo.refs().get(into)?;
+    println!(
+        "merged {} branch(es) into {into}; frontier now has {} tip(s)",
+        sources.len(),
+        frontier.0.len()
+    );
+
+    let root = std::env::current_dir()?;
+    let wc = mosaic_core::working_copy::WorkingCopy::open(&repo, &root);
+    let profile = mosaic_core::sparse::SparseProfile::load(&root)?;
+    let (_written, merges) = wc.checkout(into, &profile)?;
+    if merges.is_empty() {
+        println!("clean merge — no divergent files.");
+    } else {
+        println!("auto-merged {} file(s):", merges.len());
+        for n in &merges {
+            if n.binary {
+                println!("  {} — binary, kept one version (review manually)", n.path);
+            } else if n.conflicts == 0 {
+                println!("  {} — clean", n.path);
+            } else {
+                println!(
+                    "  {} — {} conflict(s); resolve with `mos resolve {}`",
+                    n.path, n.conflicts, n.path
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn id_show() -> Result<(), AppError> {
     let repo = open_here()?;
     if !repo.has_identity() {
@@ -1337,7 +1501,18 @@ fn bundle_create(out: &PathBuf, branch: Option<&str>) -> Result<(), AppError> {
         .collect();
     let bundle = match branch {
         Some(name) => mosaic_core::sync::build_bundle_for_branch(&repo, name, &ordered)?,
-        None => mosaic_core::sync::build_bundle(&repo, &ordered)?,
+        None => {
+            // A whole-repo bundle must carry *every* branch ref, otherwise a
+            // fresh repo that applies it has the changes but no branch to check
+            // out (the change is in the DAG, `checkout main` writes nothing).
+            let mut bundle = mosaic_core::sync::build_bundle(&repo, &ordered)?;
+            for name in repo.refs().list()? {
+                if let Ok(frontier) = repo.refs().get(&name) {
+                    bundle.branch_advances.insert(name, frontier);
+                }
+            }
+            bundle
+        }
     };
     let bytes = bundle.encode()?;
     fs::write(out, &bytes)?;
@@ -2224,13 +2399,18 @@ fn add_cmd(paths: &[String], branch: &str) -> Result<(), AppError> {
     let mut index = StagedIndex::load(&root)?;
 
     if paths.is_empty() || paths.iter().any(|p| p == ".") {
+        let before: std::collections::BTreeSet<String> = index.paths.clone();
         let added = wc.stage_all_modified(branch, &mut index)?;
         index.save(&root)?;
         println!("staged {added} file(s)");
+        for p in index.paths.iter().filter(|p| !before.contains(*p)).take(30) {
+            println!("  + {p}");
+        }
         return Ok(());
     }
     for p in paths {
         index.stage(p.clone());
+        println!("  + {p}");
     }
     index.save(&root)?;
     println!("staged {} file(s)", paths.len());
