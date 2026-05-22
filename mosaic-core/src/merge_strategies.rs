@@ -239,8 +239,15 @@ fn patch_merge(creator: &Hash, base: &str, ours: &str, theirs: &str) -> Result<M
         .collect();
     let base_graph = LineGraph::from_lines(creator, &base_lines);
 
-    let ours_patch = derive_text_patch(creator, &base_norm, &ours_norm);
-    let theirs_patch = derive_text_patch(creator, &base_norm, &theirs_norm);
+    // Both sides anchor on the same base (so anchors line up) but mint their
+    // *new* vertices from distinct creators. That way an identical line added
+    // on both sides becomes two distinct vertices rather than colliding into
+    // one — which previously crashed apply and, after the dedup workaround,
+    // could fuse the bodies of two separate edits into broken output.
+    let ours_creator = Hash::of(format!("{}:ours", creator.to_hex()).as_bytes());
+    let theirs_creator = Hash::of(format!("{}:theirs", creator.to_hex()).as_bytes());
+    let ours_patch = derive_text_patch(creator, &ours_creator, &base_norm, &ours_norm);
+    let theirs_patch = derive_text_patch(creator, &theirs_creator, &base_norm, &theirs_norm);
 
     three_way_merge(&base_graph, &ours_patch, &theirs_patch)
 }
@@ -255,8 +262,8 @@ fn normalize(s: &str) -> String {
     }
 }
 
-fn derive_text_patch(creator: &Hash, before: &str, after: &str) -> Patch {
-    let result = crate::crdt::compile_session(creator, before, after)
+fn derive_text_patch(anchor_creator: &Hash, insert_creator: &Hash, before: &str, after: &str) -> Patch {
+    let result = crate::crdt::compile_session_salted(anchor_creator, insert_creator, before, after)
         .expect("compile_session on plain strings is infallible");
     result.patch
 }
@@ -380,35 +387,41 @@ mod tests {
     }
 
     #[test]
-    fn identical_line_on_both_sides_does_not_crash_and_dedupes() {
-        // Regression: both sides insert the *same* line ("SHARED"). They derive
-        // the same content-addressed VertexId, which used to abort the merge
-        // with "vertex already exists". It must now merge cleanly, keeping the
-        // shared line exactly once.
+    fn identical_line_on_both_sides_does_not_crash() {
+        // Regression: both sides insert a line with identical content
+        // ("SHARED"). Under a single creator these derived the same VertexId and
+        // aborted the merge ("vertex already exists"). With per-side creators it
+        // must merge without crashing and keep *both* sides' unique work.
         let base = "alpha\nbeta\n";
         let ours = "alpha\nOURS\nSHARED\nbeta\n";
         let theirs = "alpha\nTHEIRS\nSHARED\nbeta\n";
         let creator = Hash::of(b"identical-line");
         let result = merge_text_file(&creator, None, base, ours, theirs)
             .expect("merge must not crash on identical concurrent inserts");
-        let shared = result.merged_lines.iter().filter(|l| *l == "SHARED").count();
-        assert_eq!(shared, 1, "shared line should appear once, got {shared}");
         assert!(result.merged_lines.iter().any(|l| l == "OURS"));
         assert!(result.merged_lines.iter().any(|l| l == "THEIRS"));
+        assert!(result.merged_lines.iter().any(|l| l == "SHARED"));
     }
 
     #[test]
-    fn identical_block_on_both_sides_merges_to_single_copy() {
-        // Two agents independently add the same closing line — extremely common
-        // (e.g. `return 0`, `}`). Must not crash; the line stays once.
-        let base = "fn main() {\n}\n";
-        let ours = "fn main() {\n    a();\n    return 0;\n}\n";
-        let theirs = "fn main() {\n    b();\n    return 0;\n}\n";
-        let creator = Hash::of(b"identical-block");
-        let result = merge_text_file(&creator, Some(Lang::Rust), base, ours, theirs)
+    fn concurrent_blocks_with_identical_body_lines_stay_valid() {
+        // Two agents each add a distinct `if` block whose bodies share identical
+        // lines. Fusing those identical lines into one (the old dedup) left each
+        // `if` without a body — syntactically broken. Per-side creators keep
+        // each block's body intact: both bodies must survive.
+        let base = "def main():\n    pass\n";
+        let ours = "def main():\n    if a:\n        do()\n        return 0\n    pass\n";
+        let theirs = "def main():\n    if b:\n        do()\n        return 0\n    pass\n";
+        let creator = Hash::of(b"concurrent-blocks");
+        let result = merge_text_file(&creator, Some(Lang::Python), base, ours, theirs)
             .expect("merge must not crash");
-        let returns = result.merged_lines.iter().filter(|l| l.contains("return 0")).count();
-        assert_eq!(returns, 1, "return line should appear once, got {returns}");
+        // Both guards present...
+        assert!(result.merged_lines.iter().any(|l| l.contains("if a:")));
+        assert!(result.merged_lines.iter().any(|l| l.contains("if b:")));
+        // ...and the shared body line survives for *each* block (two copies),
+        // so neither `if` is left bodyless.
+        let bodies = result.merged_lines.iter().filter(|l| l.contains("do()")).count();
+        assert_eq!(bodies, 2, "each block must keep its own body, got {bodies}");
     }
 
     #[test]

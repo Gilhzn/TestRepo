@@ -171,6 +171,23 @@ pub struct LiveCommit {
 }
 
 pub fn compile_session(creator: &Hash, before: &str, after: &str) -> Result<LiveCommit> {
+    compile_session_salted(creator, creator, before, after)
+}
+
+/// Like [`compile_session`], but derives the *new* inserted vertices from
+/// `insert_creator` while anchoring on a base graph built from
+/// `anchor_creator`. Merging two sides of the same base must use the same
+/// `anchor_creator` (so anchors line up) but *distinct* `insert_creator`s, so
+/// that an identical line added on both sides becomes two distinct vertices
+/// (both bodies survive the merge) instead of colliding into one — which would
+/// otherwise crash apply, or worse, silently fuse the bodies of two separate
+/// edits into syntactically-broken output.
+pub fn compile_session_salted(
+    anchor_creator: &Hash,
+    insert_creator: &Hash,
+    before: &str,
+    after: &str,
+) -> Result<LiveCommit> {
     let before_lines: Vec<&str> = before.split_inclusive('\n').collect();
     let after_lines: Vec<&str> = after.split_inclusive('\n').collect();
 
@@ -181,7 +198,7 @@ pub fn compile_session(creator: &Hash, before: &str, after: &str) -> Result<Live
     if before.is_empty() {
         before_for_graph.clear();
     }
-    let mut graph = LineGraph::from_lines(creator, &before_for_graph);
+    let mut graph = LineGraph::from_lines(anchor_creator, &before_for_graph);
 
     let diff = TextDiff::from_slices(&before_lines, &after_lines);
 
@@ -193,7 +210,7 @@ pub fn compile_session(creator: &Hash, before: &str, after: &str) -> Result<Live
     let mut anchors: Vec<VertexId> = Vec::with_capacity(before_lines.len() + 2);
     anchors.push(graph.root_id());
     for (i, line) in before_for_graph.iter().enumerate() {
-        anchors.push(VertexId::derive(creator, i as u64, line));
+        anchors.push(VertexId::derive(anchor_creator, i as u64, line));
     }
     anchors.push(graph.sink_id());
 
@@ -218,7 +235,7 @@ pub fn compile_session(creator: &Hash, before: &str, after: &str) -> Result<Live
             }
             ChangeTag::Insert => {
                 let line_bytes = trim_newline(change.value().as_bytes()).to_vec();
-                let new_vid = VertexId::derive(creator, 1_000_000 + emitted_index, &line_bytes);
+                let new_vid = VertexId::derive(insert_creator, 1_000_000 + emitted_index, &line_bytes);
                 emitted_index += 1;
                 let new_vertex = Vertex {
                     id: new_vid,

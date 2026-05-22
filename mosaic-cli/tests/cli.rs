@@ -91,3 +91,46 @@ fn branch_merge_unions_divergent_branches() {
     assert!(merged.contains("AAA"), "feat-a's edit was dropped:\n{merged}");
     assert!(merged.contains("BBB"), "feat-b's edit was dropped:\n{merged}");
 }
+
+/// Two branches each add a distinct block whose bodies share identical lines.
+/// The merge must keep each block's body intact (not fuse the shared lines into
+/// one and leave a block bodyless) so the result stays syntactically valid.
+#[test]
+fn branch_merge_keeps_concurrent_blocks_valid() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+
+    mos(repo, &["init"]);
+    mos(repo, &["id", "setup", "--email", "a@example.com", "--name", "A"]);
+    write(&repo.join("calc.py"), "def main(op):\n    pass\n");
+    mos(repo, &["add", "."]);
+    mos(repo, &["commit", "-m", "base"]);
+
+    mos(repo, &["branch", "merge", "main", "--into", "feat-add"]);
+    write(
+        &repo.join("calc.py"),
+        "def main(op):\n    if op == \"add\":\n        print(compute())\n        return 0\n    pass\n",
+    );
+    mos(repo, &["add", "."]);
+    mos(repo, &["commit", "-b", "feat-add", "-m", "add"]);
+
+    mos(repo, &["branch", "merge", "main", "--into", "feat-sub"]);
+    mos(repo, &["checkout", "main"]);
+    write(
+        &repo.join("calc.py"),
+        "def main(op):\n    if op == \"sub\":\n        print(compute())\n        return 0\n    pass\n",
+    );
+    mos(repo, &["add", "."]);
+    mos(repo, &["commit", "-b", "feat-sub", "-m", "sub"]);
+
+    mos(repo, &["branch", "merge", "feat-add", "feat-sub", "--into", "main"]);
+    let merged = std::fs::read_to_string(repo.join("calc.py")).unwrap();
+
+    // Both guards present.
+    assert!(merged.contains("\"add\""), "add block dropped:\n{merged}");
+    assert!(merged.contains("\"sub\""), "sub block dropped:\n{merged}");
+    // Each block keeps its own body — the shared body lines must NOT collapse
+    // to a single copy (which left a bodyless `if` → broken code).
+    let bodies = merged.matches("print(compute())").count();
+    assert_eq!(bodies, 2, "a block was left bodyless:\n{merged}");
+}

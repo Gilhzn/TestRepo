@@ -185,3 +185,51 @@ not keep a background server alive).
 **Every finding from the dogfood run — both criticals and all three
 ergonomics gaps — is now addressed.** Test suite: **370** (358 Rust + 6 TS +
 6 Python).
+
+---
+
+## Round 2 (2026-05-22): re-run on the fixed flow
+
+Re-ran the multi-agent scenario on the new ergonomics: a `calc` CLI, three
+**real autonomous agents** cloning + editing + committing in parallel, then a
+central merge. Goal — does the fixed flow *feel* good, and does it hold up?
+
+### The flow feels good now
+
+- `mos clone <bundle> wsX` is **one command** that yields a ready working tree
+  (round 1 needed init + apply + checkout, with a silent zero-file footgun).
+- All three agents drove `commit -m` / `add .` (now lists staged paths) with
+  **zero guessing** and reported the flow as smooth and git-like.
+- `mos checkout main` on the 3-tip frontier auto-merged: `ops.py` (parallel)
+  clean, `calc.py` (concurrent) merged with both edits, conflict flagged.
+
+### …but it surfaced one more real correctness bug (now fixed)
+
+Two agents each added an `if`-dispatch block to the same spot in `calc.py`.
+The line-union merge kept both `if` headers, but their **identical body lines**
+(`print(...)`, `return 0`) had been deduped to a single copy (a side effect of
+the round-1 crash fix) — leaving each `if` bodyless and the file
+**syntactically broken** (`IndentationError`), even though the conflict was
+correctly flagged.
+
+**Root cause:** content-addressed line identity under a *single* creator fuses
+identical lines from different edits into one vertex. Correct for "both added
+`import os`"; wrong when the identical lines are bodies of distinct blocks.
+
+**Fix:** the merge now mints each side's *new* vertices from a distinct creator
+(`compile_session_salted`; both sides still anchor on the same base), so
+identical lines on the two sides become two vertices and each block keeps its
+body. Worst case is now a duplicated line (valid, trivially resolved) instead of
+broken code. Re-running the scenario, the merged `calc.py` is valid and runs:
+`add 3 4 → 7`, `sub 10 6 → 4`. Tests:
+`merge_strategies::concurrent_blocks_with_identical_body_lines_stay_valid`,
+`cli::branch_merge_keeps_concurrent_blocks_valid`.
+
+### Open cosmetic nits (agent feedback, not fixed)
+
+All three agents independently flagged: the bundle summary says "N changes / 1
+branch advances" where N counts the whole branch history (confusing for "I made
+one commit"); commit prints a 16-char hash with no indication it's a prefix; and
+there's no `mos status` step prompting before commit. Cosmetic — left as-is.
+
+Test suite after round 2: **371** (359 Rust + 6 TS + 6 Python).
