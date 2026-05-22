@@ -222,6 +222,76 @@ enum Cmd {
     /// Configure a sparse profile (work with a subset of a large repo).
     #[command(subcommand)]
     Sparse(SparseCmd),
+    /// Per-line attribution: which change last touched each line.
+    Blame {
+        path: String,
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
+    /// Shelve working-tree changes without committing.
+    #[command(subcommand)]
+    Stash(StashCmd),
+    /// Manage tags & releases.
+    #[command(subcommand)]
+    Tag(TagCmd),
+    /// Show the ref-movement log (recovery safety net).
+    Reflog {
+        #[arg(short, long)]
+        branch: Option<String>,
+    },
+    /// Binary-search the change DAG for a regression.
+    #[command(subcommand)]
+    Bisect(BisectCmd),
+}
+
+#[derive(Subcommand)]
+enum StashCmd {
+    /// Shelve current modifications and reset the working tree.
+    Push {
+        #[arg(short, long, default_value = "")]
+        message: String,
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
+    /// List stash entries.
+    List,
+    /// Apply a stash entry and remove it.
+    Pop { id: String },
+    /// Apply a stash entry, keeping it.
+    Apply { id: String },
+    /// Delete a stash entry without applying.
+    Drop { id: String },
+}
+
+#[derive(Subcommand)]
+enum TagCmd {
+    /// Create a tag on a change (annotated+signed if --message given).
+    Create {
+        name: String,
+        change_id: String,
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// List all tags.
+    List,
+    /// Show one tag.
+    Show { name: String },
+    /// Delete a tag.
+    Delete { name: String },
+}
+
+#[derive(Subcommand)]
+enum BisectCmd {
+    /// Start a bisect between a known-good and known-bad change.
+    Start { good: String, bad: String },
+    /// Record the current candidate as good and advance.
+    Good,
+    /// Record the current candidate as bad and advance.
+    Bad,
+    /// Show the current state / next candidate.
+    Status,
+    /// Abort the bisect session.
+    Reset,
 }
 
 #[derive(Subcommand)]
@@ -476,7 +546,287 @@ fn main() -> ExitCode {
             run(|| sparse_set(&include, &exclude))
         }
         Cmd::Sparse(SparseCmd::Clear) => run(sparse_clear),
+        Cmd::Blame { path, branch } => run(|| blame_cmd(&path, &branch)),
+        Cmd::Stash(StashCmd::Push { message, branch }) => {
+            run(|| stash_push_cmd(&message, &branch))
+        }
+        Cmd::Stash(StashCmd::List) => run(stash_list_cmd),
+        Cmd::Stash(StashCmd::Pop { id }) => run(|| stash_apply_cmd(&id, true)),
+        Cmd::Stash(StashCmd::Apply { id }) => run(|| stash_apply_cmd(&id, false)),
+        Cmd::Stash(StashCmd::Drop { id }) => run(|| stash_drop_cmd(&id)),
+        Cmd::Tag(TagCmd::Create { name, change_id, message }) => {
+            run(|| tag_create_cmd(&name, &change_id, message.as_deref()))
+        }
+        Cmd::Tag(TagCmd::List) => run(tag_list_cmd),
+        Cmd::Tag(TagCmd::Show { name }) => run(|| tag_show_cmd(&name)),
+        Cmd::Tag(TagCmd::Delete { name }) => run(|| tag_delete_cmd(&name)),
+        Cmd::Reflog { branch } => run(|| reflog_cmd(branch.as_deref())),
+        Cmd::Bisect(BisectCmd::Start { good, bad }) => run(|| bisect_start_cmd(&good, &bad)),
+        Cmd::Bisect(BisectCmd::Good) => run(|| bisect_mark_cmd(false)),
+        Cmd::Bisect(BisectCmd::Bad) => run(|| bisect_mark_cmd(true)),
+        Cmd::Bisect(BisectCmd::Status) => run(bisect_status_cmd),
+        Cmd::Bisect(BisectCmd::Reset) => run(bisect_reset_cmd),
     }
+}
+
+fn blame_cmd(path: &str, branch: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let blame = mosaic_core::blame::blame(&repo, branch, path)?;
+    if blame.lines.is_empty() {
+        println!("(no blame: {path} not found on {branch})");
+        return Ok(());
+    }
+    for line in &blame.lines {
+        println!(
+            "{} {:<18} {:>4} {}",
+            &line.change.to_hex()[..8],
+            truncate(&line.author.display(), 18),
+            line.line_no,
+            line.content
+        );
+    }
+    Ok(())
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..n - 1])
+    }
+}
+
+fn stash_push_cmd(message: &str, branch: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    match mosaic_core::stash::push(&repo, branch, message)? {
+        Some(id) => println!("stashed working changes as {id}"),
+        None => println!("nothing to stash"),
+    }
+    Ok(())
+}
+
+fn stash_list_cmd() -> Result<(), AppError> {
+    let repo = open_here()?;
+    let entries = mosaic_core::stash::list(&repo)?;
+    if entries.is_empty() {
+        println!("(no stash entries)");
+        return Ok(());
+    }
+    for e in entries {
+        let msg = if e.message.is_empty() { "(no message)" } else { &e.message };
+        println!("{}  [{}]  {} file(s)  {msg}", e.id, e.branch, e.files.len());
+    }
+    Ok(())
+}
+
+fn stash_apply_cmd(id: &str, pop: bool) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let n = if pop {
+        mosaic_core::stash::pop(&repo, id)?
+    } else {
+        mosaic_core::stash::apply(&repo, id)?
+    };
+    println!("restored {n} file(s) from stash {id}");
+    Ok(())
+}
+
+fn stash_drop_cmd(id: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    mosaic_core::stash::drop(&repo, id)?;
+    println!("dropped stash {id}");
+    Ok(())
+}
+
+fn tag_create_cmd(name: &str, change_id: &str, message: Option<&str>) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let target = parse_change_id(change_id)?;
+    let tag = match message {
+        Some(m) => {
+            let (idn, key) = repo.load_identity()?;
+            mosaic_core::tags::Tag::annotated(name, target, idn, m, &key)
+        }
+        None => mosaic_core::tags::Tag::lightweight(name, target),
+    };
+    mosaic_core::tags::create(&repo, &tag)?;
+    println!(
+        "created {} tag {name} -> {}",
+        if tag.is_signed() { "signed" } else { "lightweight" },
+        &target.to_hex()[..12]
+    );
+    Ok(())
+}
+
+fn tag_list_cmd() -> Result<(), AppError> {
+    let repo = open_here()?;
+    let tags = mosaic_core::tags::list(&repo)?;
+    if tags.is_empty() {
+        println!("(no tags)");
+        return Ok(());
+    }
+    for t in tags {
+        let kind = if t.is_signed() { "signed" } else { "light " };
+        println!("{:<20} [{kind}] {}", t.name, &t.target.to_hex()[..12]);
+    }
+    Ok(())
+}
+
+fn tag_show_cmd(name: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let tag = mosaic_core::tags::get(&repo, name)?;
+    println!("tag:    {}", tag.name);
+    println!("target: {}", tag.target.to_hex());
+    if let Some(a) = &tag.annotation {
+        println!("tagger: {}", a.tagger.display());
+        println!("message: {}", a.message);
+        println!("signature: verified ✓");
+    } else {
+        println!("(lightweight tag)");
+    }
+    Ok(())
+}
+
+fn tag_delete_cmd(name: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    mosaic_core::tags::delete(&repo, name)?;
+    println!("deleted tag {name}");
+    Ok(())
+}
+
+fn reflog_cmd(branch: Option<&str>) -> Result<(), AppError> {
+    let root = std::env::current_dir()?;
+    let log = mosaic_core::reflog::RefLog::open(&root)?;
+    let entries = match branch {
+        Some(b) => log.for_branch(b)?,
+        None => log.entries()?,
+    };
+    if entries.is_empty() {
+        println!("(no reflog entries)");
+        return Ok(());
+    }
+    for e in entries.iter().rev() {
+        println!(
+            "{:<8} {:<10} {} tip(s) -> {} tip(s)",
+            e.branch,
+            e.op,
+            e.from.len(),
+            e.to.len()
+        );
+    }
+    Ok(())
+}
+
+fn bisect_state_path() -> Result<PathBuf, AppError> {
+    Ok(std::env::current_dir()?
+        .join(".mosaic")
+        .join("bisect.json"))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BisectState {
+    good: String,
+    bad: String,
+    verdicts: Vec<(String, bool)>,
+}
+
+fn bisect_load() -> Result<Option<BisectState>, AppError> {
+    let path = bisect_state_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path)?;
+    Ok(Some(
+        serde_json::from_str(&raw).map_err(|e| AppError::Encode(e.to_string()))?,
+    ))
+}
+
+fn bisect_save(state: &BisectState) -> Result<(), AppError> {
+    let path = bisect_state_path()?;
+    if let Some(p) = path.parent() {
+        fs::create_dir_all(p)?;
+    }
+    fs::write(
+        path,
+        serde_json::to_string_pretty(state).map_err(|e| AppError::Encode(e.to_string()))?,
+    )?;
+    Ok(())
+}
+
+fn rebuild_bisect(repo: &Repository, state: &BisectState) -> Result<mosaic_core::bisect::Bisect, AppError> {
+    let good = parse_change_id(&state.good)?;
+    let bad = parse_change_id(&state.bad)?;
+    let mut b = mosaic_core::bisect::Bisect::new(repo, good, bad)?;
+    for (hex, is_bad) in &state.verdicts {
+        if let Ok(h) = Hash::from_hex(hex) {
+            b.record(h, *is_bad);
+        }
+    }
+    Ok(b)
+}
+
+fn bisect_start_cmd(good: &str, bad: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let state = BisectState {
+        good: parse_change_id(good)?.to_hex(),
+        bad: parse_change_id(bad)?.to_hex(),
+        verdicts: Vec::new(),
+    };
+    let b = rebuild_bisect(&repo, &state)?;
+    bisect_save(&state)?;
+    println!("bisecting {} candidate(s)", b.remaining());
+    if let Some(next) = b.next_candidate() {
+        println!("test this change next: {}", &next.to_hex()[..12]);
+    }
+    Ok(())
+}
+
+fn bisect_mark_cmd(is_bad: bool) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let mut state = bisect_load()?
+        .ok_or_else(|| AppError::Msg("no bisect in progress; run `mos bisect start`".into()))?;
+    let b = rebuild_bisect(&repo, &state)?;
+    let candidate = b
+        .next_candidate()
+        .ok_or_else(|| AppError::Msg("bisect already complete".into()))?;
+    state.verdicts.push((candidate.to_hex(), is_bad));
+    bisect_save(&state)?;
+    let b2 = rebuild_bisect(&repo, &state)?;
+    match b2.next_candidate() {
+        Some(next) => println!("test this change next: {}", &next.to_hex()[..12]),
+        None => {
+            if let Some(culprit) = b2.culprit() {
+                println!("first bad change: {}", culprit.to_hex());
+                let change = repo.load_change(&ChangeId(culprit))?;
+                println!("  intent: {}", change.intent.as_deref().unwrap_or("(none)"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bisect_status_cmd() -> Result<(), AppError> {
+    let repo = open_here()?;
+    let state = bisect_load()?
+        .ok_or_else(|| AppError::Msg("no bisect in progress".into()))?;
+    let b = rebuild_bisect(&repo, &state)?;
+    println!("remaining candidates: {}", b.remaining());
+    match b.next_candidate() {
+        Some(n) => println!("next: {}", &n.to_hex()[..12]),
+        None => {
+            if let Some(c) = b.culprit() {
+                println!("culprit: {}", c.to_hex());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bisect_reset_cmd() -> Result<(), AppError> {
+    let path = bisect_state_path()?;
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    println!("bisect reset");
+    Ok(())
 }
 
 fn checkout_cmd(branch: &str) -> Result<(), AppError> {
@@ -1318,7 +1668,26 @@ fn demo() -> Result<(), AppError> {
 }
 
 fn parse_change_id(s: &str) -> Result<ChangeId, AppError> {
-    Ok(ChangeId(Hash::from_hex(s)?))
+    // Full 64-char hash: parse directly.
+    if s.len() == 64 {
+        return Ok(ChangeId(Hash::from_hex(s)?));
+    }
+    // Otherwise treat as a prefix and resolve against the repo's changes
+    // (Git-style short hashes). Requires being inside a repo.
+    let s_lower = s.to_ascii_lowercase();
+    let repo = open_here()?;
+    let mut matches: Vec<Hash> = repo
+        .all_change_ids()?
+        .into_iter()
+        .filter(|h| h.to_hex().starts_with(&s_lower))
+        .collect();
+    match matches.len() {
+        1 => Ok(ChangeId(matches.pop().unwrap())),
+        0 => Err(AppError::Msg(format!("no change matches prefix {s}"))),
+        n => Err(AppError::Msg(format!(
+            "ambiguous prefix {s} matches {n} changes; use more characters"
+        ))),
+    }
 }
 
 fn comment_cmd(

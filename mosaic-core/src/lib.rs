@@ -24,12 +24,17 @@ pub mod attestation;
 pub mod working_copy;
 pub mod gc;
 pub mod audit;
+pub mod blame;
 pub mod encryption;
 pub mod git_export;
 pub mod rollback;
 pub mod watch;
 pub mod sparse;
 pub mod secrets;
+pub mod reflog;
+pub mod bisect;
+pub mod stash;
+pub mod tags;
 
 pub use error::Error;
 pub use hash::Hash;
