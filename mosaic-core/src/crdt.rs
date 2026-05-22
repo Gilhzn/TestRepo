@@ -608,4 +608,73 @@ mod tests {
             .collect();
         assert_eq!(lines, expected);
     }
+
+    /// LIVE COLLAB (3 peers): a human + two agents open the same document, edit
+    /// different regions concurrently, exchange updates full-mesh, and must
+    /// converge to one identical document — then that document compiles to a
+    /// canonical patch, and a late joiner bootstraps from a single v2 blob.
+    /// This is the "Google-Docs-for-code" pillar exercised end to end.
+    #[test]
+    fn three_peers_converge_then_compile_and_late_join() {
+        let initial = "fn calc(op: &str) -> i64 {\n    todo!()\n}\n";
+        let alice = CrdtDoc::from_text(initial); // human
+        let bot1 = CrdtDoc::new();
+        let bot2 = CrdtDoc::new();
+        // Both bots bootstrap from alice's full state.
+        let boot = alice.full_update();
+        bot1.apply_update(&boot).unwrap();
+        bot2.apply_update(&boot).unwrap();
+        assert_eq!(alice.snapshot(), bot1.snapshot());
+        assert_eq!(alice.snapshot(), bot2.snapshot());
+
+        // Concurrent edits to different regions of the same file.
+        // alice tweaks the signature; bot1 replaces the body; bot2 appends a doc line.
+        alice.insert(0, "/// computes a result\n");
+        let body_at = bot1.snapshot().find("    todo!()").unwrap() as u32;
+        bot1.remove_range(body_at, "    todo!()".len() as u32);
+        bot1.insert(body_at, "    if op == \"add\" { 1 } else { 0 }");
+        let end = bot2.snapshot().len() as u32;
+        bot2.insert(end, "// end\n");
+
+        // Full-mesh exchange: everyone applies everyone else's complete state.
+        let ua = alice.full_update();
+        let u1 = bot1.full_update();
+        let u2 = bot2.full_update();
+        for (peer, others) in [(&alice, [&u1, &u2]), (&bot1, [&ua, &u2]), (&bot2, [&ua, &u1])] {
+            for u in others {
+                peer.apply_update(u).unwrap();
+            }
+        }
+
+        // All three converged to a single byte-identical document.
+        let converged = alice.snapshot();
+        assert_eq!(converged, bot1.snapshot(), "bot1 diverged");
+        assert_eq!(converged, bot2.snapshot(), "bot2 diverged");
+        // Every edit survived.
+        assert!(converged.contains("computes a result"));
+        assert!(converged.contains("if op == \"add\""));
+        assert!(converged.contains("// end"));
+        assert!(!converged.contains("todo!()"));
+        eprintln!("--- converged document ---\n{converged}");
+
+        // The live session compiles to a canonical patch reproducing the text.
+        let commit = compile_session(&Hash::of(b"collab"), initial, &converged).unwrap();
+        let flat: Vec<String> = commit
+            .graph_after
+            .flatten()
+            .into_iter()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect();
+        let expected: Vec<String> = converged
+            .split_inclusive('\n')
+            .map(|s| s.trim_end_matches('\n').to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(flat, expected, "compiled patch did not reproduce the doc");
+
+        // A late joiner bootstraps from one compacted v2 blob and matches.
+        let dave = CrdtDoc::new();
+        dave.apply_update_v2(&alice.full_update_v2()).unwrap();
+        assert_eq!(dave.snapshot(), converged, "late joiner diverged");
+    }
 }
