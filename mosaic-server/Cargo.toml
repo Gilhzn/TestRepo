@@ -29,6 +29,8 @@ tokio-stream.workspace = true
 similar.workspace = true
 blake3.workspace = true
 reqwest.workspace = true
+axum-server.workspace = true
+rustls.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

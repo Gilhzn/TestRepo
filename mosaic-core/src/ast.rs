@@ -18,6 +18,11 @@ pub enum Lang {
     Rust,
     Python,
     TypeScript,
+    Go,
+    Java,
+    C,
+    Ruby,
+    JavaScript,
 }
 
 impl Lang {
@@ -27,6 +32,11 @@ impl Lang {
             Some("rs") => Some(Self::Rust),
             Some("py") => Some(Self::Python),
             Some("ts") | Some("tsx") => Some(Self::TypeScript),
+            Some("go") => Some(Self::Go),
+            Some("java") => Some(Self::Java),
+            Some("c") | Some("h") => Some(Self::C),
+            Some("rb") => Some(Self::Ruby),
+            Some("js") | Some("jsx") | Some("mjs") => Some(Self::JavaScript),
             _ => None,
         }
     }
@@ -36,6 +46,11 @@ impl Lang {
             Self::Rust => tree_sitter_rust::language(),
             Self::Python => tree_sitter_python::language(),
             Self::TypeScript => tree_sitter_typescript::language_typescript(),
+            Self::Go => tree_sitter_go::language(),
+            Self::Java => tree_sitter_java::language(),
+            Self::C => tree_sitter_c::language(),
+            Self::Ruby => tree_sitter_ruby::language(),
+            Self::JavaScript => tree_sitter_javascript::language(),
         }
     }
 
@@ -51,6 +66,16 @@ impl Lang {
                 "interface_declaration",
                 "method_definition",
             ],
+            Self::Go => &["function_declaration", "method_declaration", "type_declaration"],
+            Self::Java => &[
+                "class_declaration",
+                "method_declaration",
+                "interface_declaration",
+                "enum_declaration",
+            ],
+            Self::C => &["function_definition", "struct_specifier", "enum_specifier"],
+            Self::Ruby => &["method", "class", "module"],
+            Self::JavaScript => &["function_declaration", "class_declaration", "method_definition"],
         }
     }
 }
@@ -118,10 +143,14 @@ impl AstTree {
     }
 
     fn def_info(&self, node: Node<'_>) -> Option<(String, DefInfo)> {
-        let name_field = match self.lang {
-            Lang::Rust | Lang::Python | Lang::TypeScript => "name",
-        };
-        let name_node = node.child_by_field_name(name_field)?;
+        // Every supported grammar exposes the definition name under the
+        // `name` field, except a few (C `function_definition`, Go
+        // `type_declaration`) where the name is nested inside a declarator or
+        // spec. For those we fall back to scanning for the first
+        // identifier-like descendant. If nothing is found we skip the def.
+        let name_node = node
+            .child_by_field_name("name")
+            .or_else(|| first_identifier(node))?;
         let name_bytes = &self.source[name_node.start_byte()..name_node.end_byte()];
         let name = String::from_utf8_lossy(name_bytes).to_string();
         Some((
@@ -142,6 +171,25 @@ pub struct DefInfo {
     pub body_hash: Hash,
     pub start_byte: usize,
     pub end_byte: usize,
+}
+
+/// Find the first identifier-like descendant of `node` in pre-order. Used as a
+/// fallback for grammars where a definition's name is not exposed via a `name`
+/// field (e.g. C `function_definition`, whose name is nested in the
+/// declarator, or Go `type_declaration`, whose name lives in a `type_spec`).
+fn first_identifier<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "identifier" | "field_identifier" | "type_identifier" => return Some(child),
+            _ => {
+                if let Some(found) = first_identifier(child) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn node_hash(node: Node<'_>, source: &[u8]) -> Hash {
@@ -271,10 +319,65 @@ class Beta:
     }
 
     #[test]
+    fn go_definitions() {
+        let src = b"package main\nfunc Alpha() {}\nfunc Beta() int { return 1 }\ntype Gamma struct { x int }\n";
+        let ast = AstTree::parse(Lang::Go, src).unwrap();
+        let defs = ast.definitions();
+        assert!(defs.contains_key("Alpha"), "got: {:?}", defs.keys().collect::<Vec<_>>());
+        assert!(defs.contains_key("Beta"));
+        assert!(defs.contains_key("Gamma"));
+    }
+
+    #[test]
+    fn java_definitions() {
+        let src = b"class Foo { void bar() {} }\ninterface Shape { int area(); }\n";
+        let ast = AstTree::parse(Lang::Java, src).unwrap();
+        let defs = ast.definitions();
+        assert!(defs.contains_key("Foo"), "got: {:?}", defs.keys().collect::<Vec<_>>());
+        assert!(defs.contains_key("Shape"));
+    }
+
+    #[test]
+    fn c_definitions() {
+        let src = b"int add(int a, int b) { return a + b; }\nstruct Point { double x; double y; };\n";
+        let ast = AstTree::parse(Lang::C, src).unwrap();
+        let defs = ast.definitions();
+        assert!(defs.contains_key("add"), "got: {:?}", defs.keys().collect::<Vec<_>>());
+        assert!(defs.contains_key("Point"));
+    }
+
+    #[test]
+    fn ruby_definitions() {
+        let src = b"def greet\n  1\nend\nclass Box\nend\nmodule Util\nend\n";
+        let ast = AstTree::parse(Lang::Ruby, src).unwrap();
+        let defs = ast.definitions();
+        assert!(defs.contains_key("greet"), "got: {:?}", defs.keys().collect::<Vec<_>>());
+        assert!(defs.contains_key("Box"));
+        assert!(defs.contains_key("Util"));
+    }
+
+    #[test]
+    fn javascript_definitions() {
+        let src = b"function greet(){ return 1; }\nclass Box { open() {} }\n";
+        let ast = AstTree::parse(Lang::JavaScript, src).unwrap();
+        let defs = ast.definitions();
+        assert!(defs.contains_key("greet"), "got: {:?}", defs.keys().collect::<Vec<_>>());
+        assert!(defs.contains_key("Box"));
+    }
+
+    #[test]
     fn lang_from_path() {
         assert_eq!(Lang::from_path("src/main.rs"), Some(Lang::Rust));
         assert_eq!(Lang::from_path("script.py"), Some(Lang::Python));
         assert_eq!(Lang::from_path("ui/App.tsx"), Some(Lang::TypeScript));
+        assert_eq!(Lang::from_path("server/main.go"), Some(Lang::Go));
+        assert_eq!(Lang::from_path("src/Main.java"), Some(Lang::Java));
+        assert_eq!(Lang::from_path("lib/util.c"), Some(Lang::C));
+        assert_eq!(Lang::from_path("lib/util.h"), Some(Lang::C));
+        assert_eq!(Lang::from_path("app/box.rb"), Some(Lang::Ruby));
+        assert_eq!(Lang::from_path("ui/app.js"), Some(Lang::JavaScript));
+        assert_eq!(Lang::from_path("ui/App.jsx"), Some(Lang::JavaScript));
+        assert_eq!(Lang::from_path("ui/app.mjs"), Some(Lang::JavaScript));
         assert_eq!(Lang::from_path("README.md"), None);
     }
 }

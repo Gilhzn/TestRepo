@@ -437,6 +437,269 @@ mod tests {
         assert_eq!(got, vec![b"a".to_vec(), b"y".to_vec(), b"c".to_vec()]);
     }
 
+    // ---------------------------------------------------------------------
+    // Adversarial property / fuzz tests for the merge engine.
+    //
+    // These throw thousands of random base graphs + two random *concurrent*
+    // patches at `three_way_merge` and assert it never wedges. We use a
+    // hand-rolled deterministic LCG (copied from `crdt.rs`) so every failure
+    // is reproducible from the printed seed — no proptest/quickcheck dep.
+    // ---------------------------------------------------------------------
+
+    /// Deterministic mini-PRNG so the fuzz tests are reproducible without
+    /// pulling in a proptest dependency. Same seed → same sequence. This is
+    /// the established convention in this codebase (see `crdt.rs`).
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1)
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 ^ (self.0 >> 33)
+        }
+        fn range(&mut self, n: u64) -> u64 {
+            if n == 0 { 0 } else { self.next_u64() % n }
+        }
+    }
+
+    /// Build a random base graph from a seed: a fixed creator, between 1 and
+    /// `max_lines` lines whose contents are short distinct tokens. Returns the
+    /// creator and the constructed `LineGraph`.
+    fn random_base(rng: &mut Rng, max_lines: u64) -> (Hash, LineGraph) {
+        let c = creator(b"base");
+        let n = 1 + rng.range(max_lines); // never empty
+        let contents: Vec<Vec<u8>> = (0..n)
+            .map(|i| format!("L{i}").into_bytes())
+            .collect();
+        let refs: Vec<&[u8]> = contents.iter().map(|v| v.as_slice()).collect();
+        let g = LineGraph::from_lines(&c, &refs);
+        (c, g)
+    }
+
+    /// The ordered list of base vertex ids as they appear in the linear chain,
+    /// bracketed by root and sink, so consecutive entries are adjacent. Only
+    /// vertices that are still alive (plus the sentinels) participate as
+    /// insert slots; this mirrors how the existing tests pick anchors.
+    fn alive_chain(base: &LineGraph) -> Vec<VertexId> {
+        // `from_lines` builds root -> L0 -> L1 -> ... -> sink, and `flatten`
+        // returns the alive line bytes in that exact topological order. We
+        // recover the ids from the creator + index used by `from_lines`.
+        let c = creator(b"base");
+        let mut chain = vec![base.root_id()];
+        let flat = base.flatten();
+        for (i, bytes) in flat.iter().enumerate() {
+            // `from_lines` derived each id from (creator, original_index, bytes).
+            // The original index equals position `i` because nothing has been
+            // killed in a freshly-built base.
+            let _ = bytes;
+            chain.push(VertexId::derive(&c, i as u64, format!("L{i}").as_bytes()));
+        }
+        chain.push(base.sink_id());
+        chain
+    }
+
+    /// Generate one well-formed random patch over `base`. `side_tag` keeps the
+    /// two concurrent patches' freshly-introduced vertices in distinct creator
+    /// namespaces so they never accidentally collide. We only emit ops that
+    /// reference vertices that exist in the base or were introduced earlier in
+    /// this same patch — anything else is skipped rather than emitted, so the
+    /// resulting patch always `apply`s cleanly (the point is to fuzz *valid*
+    /// concurrent patches, not malformed ones).
+    fn random_patch(
+        rng: &mut Rng,
+        base: &LineGraph,
+        side_tag: &[u8],
+        max_ops: u64,
+    ) -> Patch {
+        let side_creator = creator(side_tag);
+        // Adjacent alive slots from the base chain: (anchor, before) pairs.
+        let chain = alive_chain(base);
+        let mut ops: Vec<Op> = Vec::new();
+        // Track ids we have introduced so later ops can anchor on them, and
+        // which ids we have already flipped (to avoid double-kill within the
+        // same patch, which `apply` would reject as already-dead is fine but
+        // a fresh kill of an alive base vertex is the clean move).
+        let mut introduced: Vec<(VertexId, Vec<u8>)> = Vec::new();
+        let mut killed: BTreeSet<VertexId> = BTreeSet::new();
+        let n_ops = rng.range(max_ops + 1);
+        let mut fresh_idx: u64 = 0;
+        for _ in 0..n_ops {
+            // Bias toward inserts (move 0/1) over kills (move 2).
+            let move_kind = rng.range(3);
+            if move_kind < 2 {
+                // INSERT between an adjacent alive pair, or after a vertex this
+                // patch just introduced (chained insert).
+                let use_chained = !introduced.is_empty() && rng.range(3) == 0;
+                let (anchor, before) = if use_chained {
+                    // Anchor on a freshly introduced vertex; its `before` is the
+                    // `before` we recorded — but simplest valid move is to point
+                    // the new vertex at the sink, which always exists.
+                    let pick = rng.range(introduced.len() as u64) as usize;
+                    (introduced[pick].0, base.sink_id())
+                } else {
+                    if chain.len() < 2 {
+                        continue;
+                    }
+                    let slot = rng.range((chain.len() - 1) as u64) as usize;
+                    (chain[slot], chain[slot + 1])
+                };
+                let bytes = format!("{}-{}", String::from_utf8_lossy(side_tag), fresh_idx)
+                    .into_bytes();
+                let id = VertexId::derive(&side_creator, fresh_idx, &bytes);
+                // Guard against an id collision with anything already present.
+                if base.contains(&id) || introduced.iter().any(|(i, _)| *i == id) {
+                    continue;
+                }
+                fresh_idx += 1;
+                let vertex = Vertex {
+                    id,
+                    bytes: bytes.clone(),
+                    alive: true,
+                };
+                ops.push(Op::InsertAfter {
+                    anchor,
+                    before,
+                    vertex,
+                });
+                introduced.push((id, bytes));
+            } else {
+                // KILL an alive base vertex (skip root/sink and already-killed).
+                if chain.len() <= 2 {
+                    continue;
+                }
+                // Interior of the chain are the real base vertices.
+                let interior = chain.len() - 2;
+                if interior == 0 {
+                    continue;
+                }
+                let pick = 1 + rng.range(interior as u64) as usize;
+                let target = chain[pick];
+                if killed.contains(&target) {
+                    continue;
+                }
+                killed.insert(target);
+                ops.push(Op::Kill { target });
+            }
+        }
+        Patch::from_ops(ops)
+    }
+
+    /// Set of alive line-contents in a graph, sorted for order-independent
+    /// comparison.
+    fn alive_set(g: &LineGraph) -> Vec<Vec<u8>> {
+        let mut v: Vec<Vec<u8>> = g.flatten().iter().map(|b| b.to_vec()).collect();
+        v.sort();
+        v
+    }
+
+    /// PROPERTY FUZZ: across many seeds, random concurrent patch pairs over a
+    /// random base must never wedge the merge engine. For every triple we
+    /// assert:
+    ///   1. `three_way_merge` returns `Ok` (never panics, never errors).
+    ///   2. the merged graph is acyclic and well-formed.
+    ///   3. the repo never wedges: every vertex introduced by *both* sides is
+    ///      present and alive, and `flatten()` succeeds.
+    ///   4. determinism: re-running on the same inputs is byte-identical and
+    ///      yields an identical conflict list.
+    ///   5. order-independence: the SET of surviving alive lines is the same
+    ///      whether we merge (ours, theirs) or (theirs, ours).
+    ///   6. resolution is total: every `ResolveStrategy` resolves to `Ok`.
+    #[test]
+    fn fuzz_three_way_merge_never_wedges() {
+        const ROUNDS: u64 = 400;
+        const MAX_LINES: u64 = 12;
+        const MAX_OPS: u64 = 30;
+
+        for round in 0..ROUNDS {
+            let seed = 0xC0FFEE_u64
+                .wrapping_mul(round.wrapping_add(1))
+                .wrapping_add(round * 0x1234_5678);
+            let mut rng = Rng::new(seed);
+
+            let (_c, base) = random_base(&mut rng, MAX_LINES);
+            assert!(
+                base.is_acyclic(),
+                "round {round} seed {seed:#x}: base graph not acyclic"
+            );
+            let ours = random_patch(&mut rng, &base, b"ours", MAX_OPS);
+            let theirs = random_patch(&mut rng, &base, b"theirs", MAX_OPS);
+
+            // --- (1) never panics / always Ok ---------------------------------
+            let res = three_way_merge(&base, &ours, &theirs).unwrap_or_else(|e| {
+                panic!("round {round} seed {seed:#x}: three_way_merge errored: {e:?}")
+            });
+
+            // --- (2) graph always acyclic & well-formed -----------------------
+            assert!(
+                res.graph.is_acyclic(),
+                "round {round} seed {seed:#x}: merged graph has a cycle"
+            );
+
+            // --- (3) repo never wedges: both sides' inserts survive -----------
+            // flatten() must not panic; capture the alive contents.
+            let merged_alive: BTreeSet<Vec<u8>> =
+                res.graph.flatten().iter().map(|b| b.to_vec()).collect();
+            for v in ours.introduced().iter().chain(theirs.introduced().iter()) {
+                assert_eq!(
+                    res.graph.is_alive(v),
+                    Some(true),
+                    "round {round} seed {seed:#x}: introduced vertex {v:?} not alive in merge"
+                );
+                // its content must surface in the flattened output
+                if let Some(vert) = res.graph.get(v) {
+                    assert!(
+                        merged_alive.contains(&vert.bytes),
+                        "round {round} seed {seed:#x}: introduced line {:?} missing from flatten",
+                        String::from_utf8_lossy(&vert.bytes)
+                    );
+                }
+            }
+
+            // --- (4) determinism ---------------------------------------------
+            let res2 = three_way_merge(&base, &ours, &theirs).unwrap_or_else(|e| {
+                panic!("round {round} seed {seed:#x}: re-merge errored: {e:?}")
+            });
+            let flat1: Vec<Vec<u8>> = res.graph.flatten().iter().map(|b| b.to_vec()).collect();
+            let flat2: Vec<Vec<u8>> = res2.graph.flatten().iter().map(|b| b.to_vec()).collect();
+            assert_eq!(
+                flat1, flat2,
+                "round {round} seed {seed:#x}: non-deterministic flatten"
+            );
+            assert_eq!(
+                format!("{:?}", res.conflicts),
+                format!("{:?}", res2.conflicts),
+                "round {round} seed {seed:#x}: non-deterministic conflict list"
+            );
+
+            // --- (5) order-independence of the union graph (as a set) --------
+            let res_rev = three_way_merge(&base, &theirs, &ours).unwrap_or_else(|e| {
+                panic!("round {round} seed {seed:#x}: swapped merge errored: {e:?}")
+            });
+            assert_eq!(
+                alive_set(&res.graph),
+                alive_set(&res_rev.graph),
+                "round {round} seed {seed:#x}: alive-line SET differs across merge order"
+            );
+
+            // --- (6) resolution is total -------------------------------------
+            for strat in [
+                ResolveStrategy::Ours,
+                ResolveStrategy::Theirs,
+                ResolveStrategy::Union,
+            ] {
+                res.clone().resolve(strat).unwrap_or_else(|e| {
+                    panic!(
+                        "round {round} seed {seed:#x}: resolve({strat:?}) errored: {e:?}"
+                    )
+                });
+            }
+        }
+    }
+
     #[test]
     fn merge_result_graph_is_acyclic() {
         let (_c, base, a, b, _cc) = base_abc();

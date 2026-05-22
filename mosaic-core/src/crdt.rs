@@ -29,13 +29,21 @@ use yrs::{Doc, GetString, ReadTxn, StateVector, Text, TextRef, Transact, Update}
 pub struct CrdtDoc {
     doc: Doc,
     text: TextRef,
+    /// Text already folded into committed patches. `commit_increment` diffs
+    /// only the tail since this baseline and then advances it, so each commit
+    /// in a long-lived session costs O(delta) rather than O(whole document).
+    committed: std::cell::RefCell<String>,
 }
 
 impl CrdtDoc {
     pub fn new() -> Self {
         let doc = Doc::new();
         let text = doc.get_or_insert_text("content");
-        Self { doc, text }
+        Self {
+            doc,
+            text,
+            committed: std::cell::RefCell::new(String::new()),
+        }
     }
 
     pub fn from_text(initial: &str) -> Self {
@@ -43,6 +51,9 @@ impl CrdtDoc {
         let mut txn = me.doc.transact_mut();
         me.text.insert(&mut txn, 0, initial);
         drop(txn);
+        // The seeded text is pre-existing committed content: the incremental
+        // baseline starts there so the first commit only captures live edits.
+        *me.committed.borrow_mut() = initial.to_string();
         me
     }
 
@@ -81,6 +92,65 @@ impl CrdtDoc {
         Ok(())
     }
 
+    /// The text already folded into committed patches — the incremental
+    /// baseline that [`commit_increment`](Self::commit_increment) advances.
+    pub fn committed_baseline(&self) -> String {
+        self.committed.borrow().clone()
+    }
+
+    /// Compile only the edits made since the last committed baseline into a
+    /// canonical patch, then advance the baseline to the current snapshot.
+    ///
+    /// This is the incremental form of [`compile_session`]: in a long live
+    /// session a peer commits repeatedly, and each call diffs just the tail it
+    /// hasn't committed yet rather than re-diffing the whole document. A run of
+    /// increments reproduces the same final text as one big `compile_session`,
+    /// but every individual commit stays proportional to its own delta.
+    pub fn commit_increment(&self, creator: &Hash) -> Result<LiveCommit> {
+        let before = self.committed.borrow().clone();
+        let after = self.snapshot();
+        let commit = compile_session(creator, &before, &after)?;
+        *self.committed.borrow_mut() = after;
+        Ok(commit)
+    }
+
+    /// Full-state bootstrap update in the v1 wire format. A late-joining peer
+    /// applies this single blob to obtain the entire document without replaying
+    /// the op log.
+    pub fn full_update(&self) -> Vec<u8> {
+        let txn = self.doc.transact();
+        txn.encode_state_as_update_v1(&StateVector::default())
+    }
+
+    /// Compacted full-state bootstrap update in the v2 wire format, which
+    /// run-length-encodes structure and clocks. For a document built from many
+    /// small edits this is materially smaller than streaming each update — the
+    /// client-side compaction a peer runs before persisting or shipping a
+    /// long-lived doc. Pair with [`apply_update_v2`](Self::apply_update_v2).
+    pub fn full_update_v2(&self) -> Vec<u8> {
+        let txn = self.doc.transact();
+        txn.encode_state_as_update_v2(&StateVector::default())
+    }
+
+    pub fn apply_update_v2(&self, update_bytes: &[u8]) -> Result<()> {
+        let update = Update::decode_v2(update_bytes)
+            .map_err(|e| crate::error::Error::Serialization(format!("bad v2 update: {e}")))?;
+        let mut txn = self.doc.transact_mut();
+        txn.apply_update(update);
+        Ok(())
+    }
+
+    /// Produce a compacted clone: a fresh document carrying identical content
+    /// but reconstructed from a single compacted v2 state blob, dropping the
+    /// accumulated op history (deleted-content payloads are GC'd). The
+    /// incremental baseline is carried over unchanged.
+    pub fn compacted(&self) -> Result<CrdtDoc> {
+        let blob = self.full_update_v2();
+        let out = CrdtDoc::new();
+        out.apply_update_v2(&blob)?;
+        *out.committed.borrow_mut() = self.committed.borrow().clone();
+        Ok(out)
+    }
 }
 
 impl Default for CrdtDoc {
@@ -413,6 +483,79 @@ mod tests {
                 "round {round} (seed {seed:#x}) diverged after exchange",
             );
         }
+    }
+
+    /// INCREMENTAL COMPILE: a second commit must diff only the text added
+    /// since the first commit, not re-emit the already-committed lines.
+    #[test]
+    fn incremental_commit_diffs_only_the_tail() {
+        let creator = Hash::of(b"inc");
+        let doc = CrdtDoc::from_text("alpha\nbeta\n");
+
+        doc.insert(doc.snapshot().len() as u32, "gamma\n");
+        let c1 = doc.commit_increment(&creator).unwrap();
+        let lines1: Vec<String> = c1
+            .graph_after
+            .flatten()
+            .into_iter()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect();
+        assert_eq!(lines1, vec!["alpha", "beta", "gamma"]);
+        assert_eq!(doc.committed_baseline(), "alpha\nbeta\ngamma\n");
+
+        doc.insert(doc.snapshot().len() as u32, "delta\n");
+        let c2 = doc.commit_increment(&creator).unwrap();
+        let inserts = c2
+            .patch
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::InsertAfter { .. }))
+            .count();
+        assert_eq!(
+            inserts, 1,
+            "incremental commit re-diffed already-committed text (got {inserts} inserts)"
+        );
+        let lines2: Vec<String> = c2
+            .graph_after
+            .flatten()
+            .into_iter()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect();
+        assert_eq!(lines2, vec!["alpha", "beta", "gamma", "delta"]);
+        assert_eq!(doc.committed_baseline(), "alpha\nbeta\ngamma\ndelta\n");
+    }
+
+    /// CLIENT-SIDE COMPACTION: one compacted v2 state blob is smaller than the
+    /// cumulative per-op updates a streaming peer would replay, and it
+    /// reconstructs byte-identical content on a fresh peer.
+    #[test]
+    fn compaction_beats_streamed_op_log_and_preserves_content() {
+        let doc = CrdtDoc::from_text("");
+        let mut prev_sv = doc.state_vector();
+        let mut streamed_total = 0usize;
+        for i in 0..500u32 {
+            doc.insert(i, "x");
+            let upd = doc.encode_update_since(&prev_sv).unwrap();
+            streamed_total += upd.len();
+            prev_sv = doc.state_vector();
+        }
+
+        let compact = doc.full_update_v2();
+        assert!(
+            compact.len() < streamed_total,
+            "compacted blob {} not smaller than streamed log {}",
+            compact.len(),
+            streamed_total
+        );
+
+        // A late joiner applies the single compacted blob and converges.
+        let joiner = CrdtDoc::new();
+        joiner.apply_update_v2(&compact).unwrap();
+        assert_eq!(joiner.snapshot(), doc.snapshot());
+
+        // The in-place compacted clone is content-equivalent too.
+        let clone = doc.compacted().unwrap();
+        assert_eq!(clone.snapshot(), doc.snapshot());
     }
 
     #[test]

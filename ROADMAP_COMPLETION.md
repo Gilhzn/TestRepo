@@ -47,10 +47,41 @@ Features every developer reaches for that Mosaic doesn't have yet.
 
 **M8 + M9 are now complete.** Remaining gaps are all non-code.
 
+## M10 — Hardening & reach (the five deepenings)
+
+Polish items that widen the engine's reach and shore up its edges.
+
+- ✅ **Web UI write-path ("local authoring mode")** — the dashboard can now
+  author reviews and issues without holding a private key: `/local` endpoints
+  (`POST /api/v1/changes/:id/comments|approvals/local`,
+  `POST /api/v1/issues/local`, `POST /api/v1/issues/:n/events/local`) sign the
+  artifact with the repository's own stored identity. Comment/approve forms in
+  `change.html`; a new `issues.html` page lists, files, comments on, and
+  opens/closes issues (2 integration tests, incl. signature verification).
+- ✅ **Five more tree-sitter languages** — Go, Java, C, Ruby, JavaScript join
+  Rust/Python/TypeScript in the AST/semantic-merge layer, with a
+  `first_identifier` fallback for grammars (C, Go) that nest the name in a
+  declarator (6 tests; `ast` module now 13).
+- ✅ **Adversarial merge-engine fuzzing** — `fuzz_three_way_merge_never_wedges`
+  throws 400 rounds of random base graphs + two concurrent patches at
+  `three_way_merge`, asserting it always returns `Ok`, the graph is acyclic,
+  both sides survive, results are deterministic and order-independent, and all
+  three resolve strategies are total. No defect surfaced (`merge` module now 17).
+- ✅ **Native TLS** — `mosaic-serve --tls-cert --tls-key` terminates HTTPS
+  in-process via `axum-server` + rustls (ring), no reverse proxy required
+  (`serve_tls`; 1 integration test over real HTTPS).
+- ✅ **CRDT incremental compile + client-side compaction** — `commit_increment`
+  diffs only the tail since the last committed baseline (O(delta) commits in a
+  long session); `full_update_v2` / `compacted` produce a single compacted
+  bootstrap blob that beats replaying the streamed op log and reconstructs
+  identical content on a fresh peer (2 tests).
+
+**M8 + M9 + M10 are now complete.** Remaining gaps are all non-code.
+
 ## Non-code (tracked, out of engine scope)
 - ⬜ Dogfooding with a real team · Hosting / "Mosaic Cloud" · external
   security audit + SOC2/ISO · community + reference customers + pricing.
 
 ---
 
-## Current test count: **355 / 355 passing** (343 Rust + 6 TS + 6 Python)
+## Current test count: **365 / 365 passing** (353 Rust + 6 TS + 6 Python)

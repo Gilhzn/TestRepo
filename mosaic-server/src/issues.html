@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mosaic · issues</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fafafa; --fg: #111; --muted: #666; --accent: #4a5fbf;
+    --card: #fff; --border: #e2e2e2;
+    --open-bg: #e6ffec; --open-fg: #1b4332;
+    --closed-bg: #ffeef0; --closed-fg: #67101a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1a1a; --fg: #eee; --muted: #999; --accent: #8aa0e8;
+      --card: #232323; --border: #333;
+      --open-bg: #0d2f1c; --open-fg: #88e8a4;
+      --closed-bg: #2f0d12; --closed-fg: #f08894;
+    }
+  }
+  body { background: var(--bg); color: var(--fg); margin: 0;
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, sans-serif; }
+  header { padding: 20px 32px; border-bottom: 1px solid var(--border); background: var(--card); }
+  header h1 { margin: 0; font-size: 18px; }
+  header .nav { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  header .nav a { color: var(--accent); text-decoration: none; }
+  main { padding: 20px 32px; max-width: 900px; margin: 0 auto; }
+  section { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 18px; margin-bottom: 16px; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  .issue { padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px;
+    margin-bottom: 8px; cursor: pointer; }
+  .issue:hover { border-color: var(--accent); }
+  .issue .num { color: var(--muted); font-family: ui-monospace, monospace; }
+  .issue .title { font-weight: 600; }
+  .status { font-size: 11px; padding: 1px 8px; border-radius: 4px; }
+  .status.Open { background: var(--open-bg); color: var(--open-fg); }
+  .status.Closed { background: var(--closed-bg); color: var(--closed-fg); }
+  .event { padding: 8px 10px; border-left: 2px solid var(--border); margin: 6px 0; font-size: 13px; }
+  .event .who { font-weight: 600; }
+  .event .body { white-space: pre-wrap; margin-top: 3px; }
+  textarea, input[type=text] { width: 100%; box-sizing: border-box; font: inherit; padding: 8px 10px;
+    margin-bottom: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); }
+  .btnrow { display: flex; gap: 8px; flex-wrap: wrap; }
+  button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--accent); color: #fff; cursor: pointer; }
+  button.secondary { background: var(--card); color: var(--fg); }
+  .formmsg { font-size: 12px; margin-top: 6px; min-height: 16px; }
+  .formmsg.err { color: var(--closed-fg); }
+  .formmsg.ok { color: var(--open-fg); }
+  .empty { color: var(--muted); font-style: italic; padding: 10px; }
+  .labels { margin-top: 4px; }
+  .label { font-size: 11px; padding: 1px 7px; border-radius: 10px; background: var(--bg);
+    border: 1px solid var(--border); color: var(--muted); margin-right: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Issues</h1>
+  <div class="nav"><a href="/">← back to dashboard</a></div>
+</header>
+<main>
+  <section>
+    <h2>New issue</h2>
+    <input type="text" id="newTitle" placeholder="Title">
+    <textarea id="newBody" rows="3" placeholder="Description (optional)"></textarea>
+    <input type="text" id="newLabels" placeholder="Labels, comma-separated (optional)">
+    <div class="btnrow"><button type="button" id="createBtn">Create issue</button></div>
+    <div class="formmsg" id="createMsg"></div>
+  </section>
+
+  <section>
+    <h2>Open & closed</h2>
+    <div id="list" class="empty">loading…</div>
+  </section>
+
+  <section id="detailSection" style="display:none">
+    <h2 id="detailTitle"></h2>
+    <div id="detailBody"></div>
+    <div id="detailEvents"></div>
+    <textarea id="commentBody" rows="2" placeholder="Comment…"></textarea>
+    <div class="btnrow">
+      <button type="button" id="commentBtn">Comment</button>
+      <button type="button" class="secondary" id="toggleStatusBtn"></button>
+    </div>
+    <div class="formmsg" id="detailMsg"></div>
+  </section>
+</main>
+<script>
+function escape(s) { return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function identName(id) {
+  if (!id) return "(unknown)";
+  if (typeof id === "string") return id;
+  if (id.Human) return id.Human.name ? `${id.Human.name} <${id.Human.email}>` : id.Human.email;
+  if (id.Agent) return `${id.Agent.name} (agent)`;
+  return JSON.stringify(id);
+}
+function setMsg(el, text, cls) { el.textContent = text; el.className = "formmsg " + (cls || ""); }
+
+async function postJSON(path, payload) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  return data;
+}
+
+async function loadList() {
+  const list = document.getElementById("list");
+  const issues = await fetch("/api/v1/issues").then(r => r.ok ? r.json() : []);
+  if (!issues.length) { list.className = "empty"; list.textContent = "No issues yet."; return; }
+  list.className = "";
+  list.innerHTML = issues.map(i => `
+    <div class="issue" data-num="${i.number}">
+      <span class="num">#${i.number}</span>
+      <span class="title">${escape(i.title)}</span>
+      <span class="status ${escape(i.status)}">${escape(i.status)}</span>
+      <div class="labels">by ${escape(i.author)}</div>
+    </div>`).join("");
+  for (const el of list.querySelectorAll(".issue")) {
+    el.addEventListener("click", () => openDetail(Number(el.dataset.num)));
+  }
+}
+
+let currentIssue = null;
+let currentStatus = "Open";
+
+async function openDetail(number) {
+  currentIssue = number;
+  const sec = document.getElementById("detailSection");
+  const detail = await fetch("/api/v1/issues/" + number).then(r => r.ok ? r.json() : null);
+  if (!detail) return;
+  currentStatus = detail.status;
+  sec.style.display = "";
+  document.getElementById("detailTitle").innerHTML =
+    `<span class="num">#${detail.issue.number}</span> ${escape(detail.issue.title)} ` +
+    `<span class="status ${escape(detail.status)}">${escape(detail.status)}</span>`;
+  const labels = (detail.issue.labels || []).map(l => `<span class="label">${escape(l)}</span>`).join("");
+  document.getElementById("detailBody").innerHTML =
+    `<div class="event"><span class="who">${escape(identName(detail.issue.author))}</span>` +
+    `<div class="body">${escape(detail.issue.body || "(no description)")}</div></div>` +
+    (labels ? `<div class="labels">${labels}</div>` : "");
+  const events = (detail.events || []).map(ev => {
+    let line = "";
+    if (ev.kind.Comment) line = escape(ev.kind.Comment.body);
+    else if (ev.kind.StatusChanged) line = "changed status to " + escape(ev.kind.StatusChanged.to);
+    else if (ev.kind.Labeled) line = "added label " + escape(ev.kind.Labeled.label);
+    else if (ev.kind.Unlabeled) line = "removed label " + escape(ev.kind.Unlabeled.label);
+    else if (ev.kind.Referenced) line = "referenced " + escape(ev.kind.Referenced.change);
+    else line = escape(JSON.stringify(ev.kind));
+    return `<div class="event"><span class="who">${escape(identName(ev.author))}</span>` +
+      `<div class="body">${line}</div></div>`;
+  }).join("");
+  document.getElementById("detailEvents").innerHTML = events;
+  const toggle = document.getElementById("toggleStatusBtn");
+  toggle.textContent = currentStatus === "Open" ? "Close issue" : "Reopen issue";
+  setMsg(document.getElementById("detailMsg"), "");
+}
+
+document.getElementById("createBtn").addEventListener("click", async () => {
+  const msg = document.getElementById("createMsg");
+  const title = document.getElementById("newTitle").value.trim();
+  if (!title) { setMsg(msg, "Title is required.", "err"); return; }
+  const labels = document.getElementById("newLabels").value.split(",")
+    .map(s => s.trim()).filter(Boolean);
+  setMsg(msg, "Signing…");
+  try {
+    const data = await postJSON("/api/v1/issues/local", {
+      title, body: document.getElementById("newBody").value, labels,
+    });
+    setMsg(msg, `Created #${data.number} as ${data.author}.`, "ok");
+    document.getElementById("newTitle").value = "";
+    document.getElementById("newBody").value = "";
+    document.getElementById("newLabels").value = "";
+    await loadList();
+  } catch (e) { setMsg(msg, String(e.message || e), "err"); }
+});
+
+document.getElementById("commentBtn").addEventListener("click", async () => {
+  const msg = document.getElementById("detailMsg");
+  const body = document.getElementById("commentBody").value.trim();
+  if (!body) { setMsg(msg, "Comment is empty.", "err"); return; }
+  setMsg(msg, "Signing…");
+  try {
+    await postJSON("/api/v1/issues/" + currentIssue + "/events/local", { kind: { Comment: { body } } });
+    document.getElementById("commentBody").value = "";
+    await openDetail(currentIssue);
+    await loadList();
+  } catch (e) { setMsg(msg, String(e.message || e), "err"); }
+});
+
+document.getElementById("toggleStatusBtn").addEventListener("click", async () => {
+  const msg = document.getElementById("detailMsg");
+  const to = currentStatus === "Open" ? "Closed" : "Open";
+  setMsg(msg, "Signing…");
+  try {
+    await postJSON("/api/v1/issues/" + currentIssue + "/events/local", { kind: { StatusChanged: { to } } });
+    await openDetail(currentIssue);
+    await loadList();
+  } catch (e) { setMsg(msg, String(e.message || e), "err"); }
+});
+
+loadList();
+</script>
+</body>
+</html>

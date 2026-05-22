@@ -100,6 +100,27 @@
   .diff-line.equal { color: var(--eq-fg); }
   .diff-line.equal::before { content: "  "; }
   .empty { color: var(--muted); font-style: italic; padding: 10px; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  .rev { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px; font-size: 13px; }
+  .rev .who { font-weight: 600; }
+  .rev .verdict { font-size: 11px; padding: 1px 8px; border-radius: 4px; margin-left: 6px; }
+  .rev .verdict.Approved { background: var(--add-bg); color: var(--add-fg); }
+  .rev .verdict.RequestedChanges { background: var(--del-bg); color: var(--del-fg); }
+  .rev .verdict.Commented { background: var(--bg); color: var(--muted); }
+  .rev .body { margin-top: 4px; white-space: pre-wrap; }
+  textarea, input[type=text] {
+    width: 100%; box-sizing: border-box; font: inherit; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg);
+  }
+  .btnrow { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button.secondary { background: var(--card); color: var(--fg); }
+  .formmsg { font-size: 12px; margin-top: 6px; min-height: 16px; }
+  .formmsg.err { color: var(--del-fg); }
+  .formmsg.ok { color: var(--add-fg); }
 </style>
 </head>
 <body>
@@ -110,15 +131,36 @@
 <main>
   <section><div id="meta" class="meta">loading…</div></section>
   <div id="files"></div>
+  <section id="review">
+    <h2>Review</h2>
+    <div id="reviewList" class="empty">loading…</div>
+    <form id="reviewForm">
+      <textarea id="reviewBody" rows="3" placeholder="Leave a comment, or approve / request changes…"></textarea>
+      <div class="btnrow">
+        <button type="submit" id="commentBtn">Comment</button>
+        <button type="button" class="secondary" data-verdict="Approved">Approve</button>
+        <button type="button" class="secondary" data-verdict="RequestedChanges">Request changes</button>
+      </div>
+      <div class="formmsg" id="reviewMsg"></div>
+    </form>
+  </section>
 </main>
 <script>
 function escape(s) {
-  return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 }
 function shortHash(s) { return s.slice(0, 12); }
 
-async function load() {
-  const id = location.pathname.split("/").pop();
+// Identity serializes as an externally-tagged enum: {Human:{email,name}} | {Agent:{name,...}}.
+function identName(id) {
+  if (!id) return "(unknown)";
+  if (typeof id === "string") return id;
+  if (id.Human) return id.Human.name ? `${id.Human.name} <${id.Human.email}>` : id.Human.email;
+  if (id.Agent) return `${id.Agent.name} (agent)`;
+  return JSON.stringify(id);
+}
+
+async function loadChange(id) {
   document.getElementById("title").textContent = "change " + shortHash(id);
 
   const detailRes = await fetch("/api/v1/changes/" + encodeURIComponent(id));
@@ -152,6 +194,70 @@ async function load() {
       </div>
       <pre class="diff">${d.hunks.map(h => `<div class="diff-line ${h.tag}">${escape(h.line || "")}</div>`).join("")}</pre>
     </div>`).join("");
+}
+
+async function loadReview(id) {
+  const list = document.getElementById("reviewList");
+  const [comments, approvals] = await Promise.all([
+    fetch("/api/v1/changes/" + encodeURIComponent(id) + "/comments").then(r => r.ok ? r.json() : []),
+    fetch("/api/v1/changes/" + encodeURIComponent(id) + "/approvals").then(r => r.ok ? r.json() : []),
+  ]);
+  const rows = [];
+  for (const a of approvals) {
+    rows.push(`<div class="rev"><span class="who">${escape(identName(a.reviewer))}</span>` +
+      `<span class="verdict ${escape(a.verdict)}">${escape(a.verdict)}</span>` +
+      (a.body ? `<div class="body">${escape(a.body)}</div>` : "") + `</div>`);
+  }
+  for (const c of comments) {
+    rows.push(`<div class="rev"><span class="who">${escape(identName(c.author))}</span>` +
+      `<div class="body">${escape(c.body)}</div></div>`);
+  }
+  list.className = rows.length ? "" : "empty";
+  list.innerHTML = rows.length ? rows.join("") : "No comments or approvals yet.";
+}
+
+function wireReviewForm(id) {
+  const form = document.getElementById("reviewForm");
+  const body = document.getElementById("reviewBody");
+  const msg = document.getElementById("reviewMsg");
+  const setMsg = (text, cls) => { msg.textContent = text; msg.className = "formmsg " + (cls || ""); };
+
+  async function post(path, payload) {
+    setMsg("Signing…", "");
+    try {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { setMsg(data.error || ("HTTP " + res.status), "err"); return; }
+      body.value = "";
+      setMsg("Saved as " + (data.author || data.reviewer || "you") + ".", "ok");
+      await loadReview(id);
+    } catch (e) {
+      setMsg(String(e), "err");
+    }
+  }
+
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    if (!body.value.trim()) { setMsg("Comment body is empty.", "err"); return; }
+    post("/api/v1/changes/" + encodeURIComponent(id) + "/comments/local", { body: body.value });
+  });
+  for (const btn of form.querySelectorAll("button[data-verdict]")) {
+    btn.addEventListener("click", () => {
+      post("/api/v1/changes/" + encodeURIComponent(id) + "/approvals/local",
+        { verdict: btn.dataset.verdict, body: body.value.trim() || null });
+    });
+  }
+}
+
+async function load() {
+  const id = location.pathname.split("/").pop();
+  await loadChange(id);
+  await loadReview(id);
+  wireReviewForm(id);
 }
 load();
 </script>

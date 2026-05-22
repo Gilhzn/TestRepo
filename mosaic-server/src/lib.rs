@@ -24,11 +24,11 @@ use axum::{
     Json, Router,
 };
 use mosaic_core::error::Error;
-use mosaic_core::issues::{Issue, IssueEvent, IssueStatus};
+use mosaic_core::issues::{Issue, IssueEvent, IssueEventBuilder, IssueEventKind, IssueStatus};
 use mosaic_core::m1::change::ChangeId;
 use mosaic_core::m1_dag::refs::Frontier;
 use mosaic_core::repo::Repository;
-use mosaic_core::review::{Approval, Comment};
+use mosaic_core::review::{Approval, ApprovalBuilder, Comment, CommentAnchor, CommentBuilder, Verdict};
 use mosaic_core::sync::{apply_bundle, build_bundle_for_branch, missing_changes_for, Bundle};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -112,16 +112,21 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/missing", get(missing))
         .route("/api/v1/bundle", post(post_bundle))
         .route("/api/v1/changes/:id/comments", get(list_comments).post(post_comment))
+        .route("/api/v1/changes/:id/comments/local", post(post_comment_local))
         .route("/api/v1/changes/:id/approvals", get(list_approvals).post(post_approval))
+        .route("/api/v1/changes/:id/approvals/local", post(post_approval_local))
         .route("/api/v1/issues", get(list_issues).post(post_issue))
+        .route("/api/v1/issues/local", post(post_issue_local))
         .route("/api/v1/issues/:number", get(get_issue))
         .route("/api/v1/issues/:number/events", post(post_issue_event))
+        .route("/api/v1/issues/:number/events/local", post(post_issue_event_local))
         .route("/api/v1/live-stats", get(live_stats))
         .route("/api/v1/events", get(events_sse))
         .route("/ws/doc/:name", get(ws::ws_handler))
         .route("/ws/awareness/:name", get(awareness::awareness_handler))
         .route("/ws/signal/:name", get(signaling::signaling_handler))
         .route("/changes/:id", get(change_detail_html))
+        .route("/issues", get(issues_html))
         .with_state(state)
 }
 
@@ -212,6 +217,15 @@ async fn change_detail_html(Path(_id): Path<String>) -> impl IntoResponse {
 }
 
 const CHANGE_HTML: &str = include_str!("change.html");
+
+async fn issues_html() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        ISSUES_HTML,
+    )
+}
+
+const ISSUES_HTML: &str = include_str!("issues.html");
 
 #[derive(Serialize, Deserialize)]
 pub struct GraphNode {
@@ -689,6 +703,126 @@ async fn post_issue_event(
     Ok(Json(serde_json::json!({ "id": event.id().to_hex() })))
 }
 
+// ---------------------------------------------------------------------------
+// Local authoring mode
+//
+// The endpoints above accept a *pre-signed* artifact: the client holds the
+// private key and signs in its own process. That's correct for distributed
+// peers, but a browser has no key — so the web UI can't author reviews or
+// issues through them.
+//
+// The `/local` variants below close that gap: the server signs the artifact
+// with the repository's own stored identity (`repo.load_identity()`), so a
+// human reviewing in the dashboard can comment, approve, and file issues
+// without a local key. This is "local authoring mode" and is only meaningful
+// on a server you control — every artifact it produces is attributed to the
+// repo's identity. If the repo has no saved identity the call fails cleanly.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct NewCommentReq {
+    body: String,
+    #[serde(default)]
+    anchor: Option<CommentAnchor>,
+    /// Hex change-comment id this comment replies to, if any.
+    #[serde(default)]
+    reply_to: Option<String>,
+}
+
+async fn post_comment_local(
+    State(s): State<Arc<AppState>>,
+    Path(id_hex): Path<String>,
+    Json(req): Json<NewCommentReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let h = mosaic_core::Hash::from_hex(&id_hex)?;
+    let _guard = s.lock.lock().await;
+    let repo = s.open()?;
+    let (idn, key) = repo.load_identity()?;
+    let mut b = CommentBuilder::new(ChangeId(h), idn, key).body(req.body);
+    if let Some(anchor) = req.anchor {
+        b = b.anchor(anchor);
+    }
+    if let Some(rt) = req.reply_to {
+        b = b.reply_to(mosaic_core::Hash::from_hex(&rt)?);
+    }
+    let comment = b.build()?;
+    let cid = repo.add_comment(&comment)?;
+    Ok(Json(serde_json::json!({
+        "id": cid.to_hex(),
+        "author": comment.author.display(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct NewApprovalReq {
+    verdict: Verdict,
+    #[serde(default)]
+    body: Option<String>,
+}
+
+async fn post_approval_local(
+    State(s): State<Arc<AppState>>,
+    Path(id_hex): Path<String>,
+    Json(req): Json<NewApprovalReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let h = mosaic_core::Hash::from_hex(&id_hex)?;
+    let _guard = s.lock.lock().await;
+    let repo = s.open()?;
+    let (idn, key) = repo.load_identity()?;
+    let mut b = ApprovalBuilder::new(ChangeId(h), idn, key, req.verdict);
+    if let Some(body) = req.body {
+        b = b.body(body);
+    }
+    let approval = b.build()?;
+    let aid = repo.add_approval(&approval)?;
+    Ok(Json(serde_json::json!({
+        "id": aid.to_hex(),
+        "reviewer": approval.reviewer.display(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct NewIssueReq {
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    labels: Vec<String>,
+}
+
+async fn post_issue_local(
+    State(s): State<Arc<AppState>>,
+    Json(req): Json<NewIssueReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let _guard = s.lock.lock().await;
+    let repo = s.open()?;
+    let (idn, key) = repo.load_identity()?;
+    let issue = repo.create_issue(req.title, req.body, idn, key, req.labels)?;
+    Ok(Json(serde_json::json!({
+        "number": issue.number,
+        "id": issue.id().to_hex(),
+        "author": issue.author.display(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct NewIssueEventReq {
+    kind: IssueEventKind,
+}
+
+async fn post_issue_event_local(
+    State(s): State<Arc<AppState>>,
+    Path(number): Path<u64>,
+    Json(req): Json<NewIssueEventReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let _guard = s.lock.lock().await;
+    let repo = s.open()?;
+    let (idn, key) = repo.load_identity()?;
+    let event = IssueEventBuilder::new(number, idn, key, req.kind).build()?;
+    repo.add_issue_event(&event)?;
+    Ok(Json(serde_json::json!({ "id": event.id().to_hex() })))
+}
+
 fn parse_have(s: &str) -> Result<Frontier, AppError> {
     let mut set = BTreeSet::new();
     if s.trim().is_empty() {
@@ -762,6 +896,44 @@ pub async fn serve(
         let _ = axum::serve(listener, app).await;
     });
     Ok((bound, handle))
+}
+
+/// Start the server on `addr` with TLS, terminating HTTPS in-process using a
+/// PEM certificate chain and private key. Returns the bound address (so tests
+/// can bind port 0 and discover the port) and a handle to the serving task.
+///
+/// This is native TLS — no reverse proxy required. The certificate and key are
+/// standard PEM files (`--tls-cert` / `--tls-key` on `mosaic-serve`).
+pub async fn serve_tls(
+    repo_root: impl Into<PathBuf>,
+    addr: std::net::SocketAddr,
+    cert_pem: impl Into<PathBuf>,
+    key_pem: impl Into<PathBuf>,
+) -> Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>), Box<dyn std::error::Error + Send + Sync>>
+{
+    // rustls 0.23 requires a process-wide crypto provider. Install ring's
+    // (idempotent — ignore the error if another component already did it).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let config =
+        axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_pem.into(), key_pem.into())
+            .await?;
+
+    let state = Arc::new(AppState::new(repo_root));
+    let app = router(state);
+    let handle = axum_server::Handle::new();
+    let serve_handle = handle.clone();
+    let task = tokio::spawn(async move {
+        let _ = axum_server::bind_rustls(addr, config)
+            .handle(serve_handle)
+            .serve(app.into_make_service())
+            .await;
+    });
+    let bound = handle
+        .listening()
+        .await
+        .ok_or("TLS server failed to bind")?;
+    Ok((bound, task))
 }
 
 pub fn repo_root_default() -> PathBuf {
@@ -1695,6 +1867,184 @@ mod tests {
         let bundle = Bundle::decode(&bytes).unwrap();
         assert_eq!(bundle.changes.len(), 1);
         assert_eq!(bundle.changes[0].id(), b);
+
+        handle.abort();
+    }
+
+    // Self-signed cert/key (CN=localhost, SAN IP:127.0.0.1), generated for
+    // tests only — never used outside this suite.
+    const TEST_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIDJTCCAg2gAwIBAgIUOejZ9dZ95R0u5iIy0YPORfYYgzkwDQYJKoZIhvcNAQEL\n\
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDUyMjExMzg1MFoXDTM2MDUx\n\
+OTExMzg1MFowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF\n\
+AAOCAQ8AMIIBCgKCAQEA2PPKASYW2bK6071aIlArEIt7+IGBOaEHeQvvSUY39N9/\n\
+IzU1kS26h7PDT/eZmpEi7llVRyJcAWbHXQNeU1fTBRvtbiRx2STKi9mYfDeFfxg/\n\
+WMTd35M9dnIZKxhDRLQK7bKyYE567QZQHUTcwErAJ539OJcle/jHngwwzGOrpiTx\n\
+rB/M1iwZFGKzGy9BtILwWYwne9R6VdxMsCWjLZvRrp643iM2uPG5Dp5JB1o+HcqC\n\
+SdGvTPIxP+WTgb2ZTWpisCWvEkQxj8A3EeQqOBJCoBtyxsJ+I6y+Jd90TrtPu6dI\n\
+GuF5iaFHKe1LgcxfaLERgS5jhuwUCZ+RUf/b7HR0KQIDAQABo28wbTAdBgNVHQ4E\n\
+FgQUvur02wsIDRlVcSBnk2cmVBlJxcswHwYDVR0jBBgwFoAUvur02wsIDRlVcSBn\n\
+k2cmVBlJxcswDwYDVR0TAQH/BAUwAwEB/zAaBgNVHREEEzARhwR/AAABgglsb2Nh\n\
+bGhvc3QwDQYJKoZIhvcNAQELBQADggEBAB/TdKDFt4o6N4JLLoGPjat216oI2MuW\n\
+TQ7rIZKk66hV3kJN2UTrgrR3KvRtlGvlYKiOv0xIeD6kLOQ0gNcrMBOf4bs1Fpul\n\
+/9LLtMb9EH4XXRfF3kmtfUROoqEjMpAHw3P9dZvoABDw5Au7Hf29waFQccc3MJxX\n\
+JYW3j/2qwR5rsC/wZjq5LjKWrAGaqyrwuSB+1hSdThP570q2VPxM3A2C5BJAkisK\n\
+8LoZQ+DfQYUcZTJ2GUT0ZDSbf32krQ/fdDuOsMlqVOefPl79yD79J5HhRe6/uLzb\n\
+KmaZqgij4Mmd6dsscdKwR95aGHFz24vxG46kXnlfWFVrnQyADYHbVSg=\n\
+-----END CERTIFICATE-----\n";
+
+    const TEST_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDY88oBJhbZsrrT\n\
+vVoiUCsQi3v4gYE5oQd5C+9JRjf0338jNTWRLbqHs8NP95makSLuWVVHIlwBZsdd\n\
+A15TV9MFG+1uJHHZJMqL2Zh8N4V/GD9YxN3fkz12chkrGENEtArtsrJgTnrtBlAd\n\
+RNzASsAnnf04lyV7+MeeDDDMY6umJPGsH8zWLBkUYrMbL0G0gvBZjCd71HpV3Eyw\n\
+JaMtm9GunrjeIza48bkOnkkHWj4dyoJJ0a9M8jE/5ZOBvZlNamKwJa8SRDGPwDcR\n\
+5Co4EkKgG3LGwn4jrL4l33ROu0+7p0ga4XmJoUcp7UuBzF9osRGBLmOG7BQJn5FR\n\
+/9vsdHQpAgMBAAECggEALTQGd9zO0AcsZCfE2vdnMahOaUXaff5uRytUbSkDSbMz\n\
+k0tn4NrtTY8H9+Z4C7uH0q+sVAj1sJkQmvGzupvG7P6XpuZTDlJbHW52FhOfbg7I\n\
+TB+gtw+/s6ksU01X3r3AtSwRfH19oVs6YA7UDADHLrn9Y8giWEVKmkSh+kQeJJyV\n\
+xRr3L4IcLDcwCQ2VPl/f5zldEdwsftt18TjLHAfbvihs1+1Uev5oxRDEsrF/n7NI\n\
+o+BgMcqn7r1kUdCnM+u8vx9ybOyY+5Sf857tcWPdJoe7V/otJOgypR4Pw5h1jg9x\n\
+k51OedDyhYF01hLshDonUv9mE2wFELaKBPcGIxSe8QKBgQDrtL02hC0110f+waIA\n\
+Has9dAlU1YJZU4vnDoSd4i7qfVzrqNLRSaWhMXhUN4uEHMDCeq6YIojTH/PUWygR\n\
+LuUniwA2uG9AFzRw3OK0U8NWdLEtA7wIbpLZnfagYGDdQirmf11aw0X1zfbIJAu9\n\
+6MdaRBfl1QJFWX3tYMq51ikkDQKBgQDrobG8DPE5/zroifcs2uUBJcq7ysMFX9QV\n\
+raa2uezN4fhF5kBvLXBH3itXYOk/pxtnOSLm1Lf2l64MLmI4CXfGww4BpvWfS9va\n\
+v/wY9BaOiT/nsPYg1cDUqheRcHob9n7hrAj2/WkqgWcMm7fYikSTWkiCLdV5yN33\n\
+V2G7Z2a9jQKBgQCne74XRsR5RYe61gwu2OYcvJ8E0NHWdy8p9370UQvVQ08LhOKI\n\
+JDS03VoLPYy9S1EM3++/2oouur2fX0aRLylVd8enGlayy8pPiCTuzbY3cKOUwNqT\n\
+gz6Fs2DThKhPj/y73DSRkb/ccYWxoStWvlkpIsl4XmtGq9h3HBfxBOQm4QKBgC9a\n\
+4LBtXXGNdNZVG+Lc3xc69CKHnmgPGT1+F7ozZX7/AflyS9LMK/uVj9pQtK/BMsWs\n\
++vGvIIWjeCwkikK+zF6axs7YMhbglP/Cg7S0IXBl7vzuWJjCvK1AvdnR5AiIonlS\n\
+LL8OsLsFJKOpC+qt5xhCFb5r3bJLByj1W8PhBQnlAoGBAMoCTBaTfllXABjInbqp\n\
+oEkoK6dXz5yJ6OHYlZ4nHeLTCZgiBhlfWrlx73Eb8lrlq6EUJ7lu0vusGQHJYfTe\n\
+/Jgeen9oqSp9oeZQN9nTp9nGWTWnomihQbYaXQdKJFYkeHGR1pe+9HJ4TZ+oFRdh\n\
+gZRFGN8znbXqBffFTIqmD/iJ\n\
+-----END PRIVATE KEY-----\n";
+
+    #[tokio::test]
+    async fn tls_serves_health_over_https() {
+        let dir = TempDir::new().unwrap();
+        let _ = Repository::init(dir.path()).unwrap();
+        let (idn, key) = human();
+        {
+            let mut repo = Repository::open(dir.path()).unwrap();
+            one_commit(&mut repo, &idn, &key, "first");
+        }
+
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+        std::fs::write(&cert_path, TEST_CERT_PEM).unwrap();
+        std::fs::write(&key_path, TEST_KEY_PEM).unwrap();
+
+        let (bound, task) = serve_tls(
+            dir.path(),
+            "127.0.0.1:0".parse().unwrap(),
+            &cert_path,
+            &key_path,
+        )
+        .await
+        .unwrap();
+
+        // Self-signed cert -> accept invalid certs for the test client only.
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+        let resp = client
+            .get(format!("https://{bound}/api/v1/health"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: HealthResponse = resp.json().await.unwrap();
+        assert!(body.ok);
+        assert_eq!(body.changes, 1);
+
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn local_authoring_signs_with_repo_identity() {
+        let dir = TempDir::new().unwrap();
+        let _ = Repository::init(dir.path()).unwrap();
+        let (idn, key) = human();
+
+        let cid = {
+            let mut repo = Repository::open(dir.path()).unwrap();
+            // Local authoring requires a saved repo identity for the server to
+            // sign with.
+            repo.save_identity(&idn, &key).unwrap();
+            one_commit(&mut repo, &idn, &key, "first")
+        };
+
+        let (addr, handle) = serve(dir.path(), "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let base = format!("http://{addr}");
+        let http = reqwest::Client::new();
+
+        // Comment authored from the "browser" (no client key).
+        let comments_url = format!("{base}/api/v1/changes/{}/comments", cid.to_hex());
+        let resp = http
+            .post(format!("{comments_url}/local"))
+            .json(&serde_json::json!({ "body": "looks good from the web UI" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let fetched: Vec<Comment> = reqwest::get(&comments_url).await.unwrap().json().await.unwrap();
+        assert_eq!(fetched.len(), 1);
+        assert_eq!(fetched[0].body, "looks good from the web UI");
+        // The server signed it with the repo identity — signature verifies.
+        fetched[0].verify().unwrap();
+
+        // Approval authored from the browser.
+        let approvals_url = format!("{base}/api/v1/changes/{}/approvals", cid.to_hex());
+        let resp = http
+            .post(format!("{approvals_url}/local"))
+            .json(&serde_json::json!({ "verdict": "Approved", "body": "ship it" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let approvals: Vec<Approval> = reqwest::get(&approvals_url).await.unwrap().json().await.unwrap();
+        assert_eq!(approvals.len(), 1);
+        approvals[0].verify().unwrap();
+
+        // Issue authored from the browser.
+        let resp = http
+            .post(format!("{base}/api/v1/issues/local"))
+            .json(&serde_json::json!({
+                "title": "web-filed issue",
+                "body": "filed without a local key",
+                "labels": ["bug"]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let created: serde_json::Value = resp.json().await.unwrap();
+        let number = created["number"].as_u64().unwrap();
+        assert_eq!(number, 1);
+
+        // Comment event on that issue, also from the browser.
+        let resp = http
+            .post(format!("{base}/api/v1/issues/{number}/events/local"))
+            .json(&serde_json::json!({ "kind": { "Comment": { "body": "a web reply" } } }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let detail: serde_json::Value = reqwest::get(format!("{base}/api/v1/issues/{number}"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(detail["issue"]["title"], "web-filed issue");
+        assert_eq!(detail["events"].as_array().unwrap().len(), 1);
 
         handle.abort();
     }
