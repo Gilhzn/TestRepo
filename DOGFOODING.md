@@ -422,4 +422,47 @@ behavior now works end to end across all eight languages.
 
 Test suite after round 6: **390** (378 Rust + 6 TS + 6 Python).
 
+---
+
+## Round 7 (2026-05-22): adversarial security & robustness audit
+
+Goal: "is it ready to market / are there critical bugs?" Ran three adversarial
+fuzzers in parallel against the surfaces where a VCS gets *critical* bugs —
+crash/corruption on untrusted input, signature bypass, and silent storage
+corruption. ~21,000 adversarial cases total.
+
+| Surface | Cases | Result |
+|---------|-------|--------|
+| Bundle `decode`/`apply` (`tests/fuzz_bundle.rs`) | ~10,500 | **no panics, no corruption** — garbage/truncated/bit-flipped/structurally-malformed bundles all surface as `Err` or apply self-consistently |
+| Signatures (`tests/fuzz_signing.rs`) | 22 attacks | **no bypass** — every field tamper, zero/garbage sig, cross-artifact swap, wrong-key sig is rejected; ed25519 binds the full canonical bytes |
+| Storage / CAS (`tests/fuzz_storage.rs`) | 564 | **no silent corruption** — every on-disk corruption caught as `HashMismatch`; chunker round-trips byte-exact across all edge sizes |
+
+The `apply_bundle` topo loop's `.expect("ready key present")` was specifically
+targeted (missing-parent, cyclic, fabricated-id bundles) and proven safe: `ready`
+ids always come from `remaining`'s own keys, and unresolvable deps return
+`Err(UnknownParent)` before any removal. (A *real* dep cycle is unforgeable —
+a change id is the BLAKE3 of its content incl. deps.)
+
+### Finding — design, not a code bug: human identity↔key binding
+
+`verify()` proves *a* key signed the content, but a human `author` **email is
+not cryptographically bound to a key**: an attacker can set
+`author = victim@example.com` with their *own* `author_key`+`sig` and pass
+`verify()`. This is no weaker than Git (whose author email is unverified) and
+the server allowlist gates *which keys* may push — but there is no email→key
+registry/attestation for humans (agents have one via `attestation.rs`). Closing
+it is a key-management/PKI project (the plan's "Sigstore-style attestation" open
+item), to be done with the external security audit — not a patch.
+
+### Verdict on "no critical bugs"
+
+The three classic critical-bug surfaces are clean under heavy fuzzing. That
+raises confidence materially, but it is **not** a proof of "bug-free" — fuzzing
+covers these surfaces, not all logic/scale/concurrency paths, and the
+identity-binding gap plus the still-pending external audit, real-team
+dogfooding, and scale testing remain. Recommended framing stays **public beta /
+early access**, not "production-ready, bug-free".
+
+Test suite after round 7: **426** (414 Rust + 6 TS + 6 Python).
+
 Test suite after round 2: **371** (359 Rust + 6 TS + 6 Python).
