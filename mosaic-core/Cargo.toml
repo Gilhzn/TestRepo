@@ -24,6 +24,7 @@ tree-sitter-python.workspace = true
 tree-sitter-typescript.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
+chacha20poly1305.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

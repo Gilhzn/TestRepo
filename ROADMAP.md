@@ -167,4 +167,11 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
 | build_bundle                               | ~20,000 changes/s   |
 | apply_bundle (signatures verified)         | ~4,700 changes/s    |
 
-## Current test count: **247 Rust + 6 TypeScript + 6 Python = 259 / 259 passing**
+## Security + compliance (NEW)
+- ✅ Encryption at rest (`mosaic_core::encryption::EncryptedCas`):
+  ChaCha20-Poly1305 AEAD over zstd-compressed blobs, content-addressed on
+  plaintext hash (dedup preserved), 32-byte master key in `<root>/key`
+  (auto-generated or KMS-supplied). Plaintext never hits disk; tampering +
+  wrong-key both detected.
+
+## Current test count: **256 Rust + 6 TypeScript + 6 Python = 268 / 268 passing**
