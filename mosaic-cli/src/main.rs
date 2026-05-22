@@ -6,6 +6,7 @@ use mosaic_core::m1::signing::SigningKey;
 use mosaic_core::m1_patch::line_graph::{LineGraph, Vertex, VertexId};
 use mosaic_core::m1_patch::merge::{three_way_merge, StructuredConflict};
 use mosaic_core::m1_patch::patch::{Op, Patch};
+use mosaic_core::issues::{IssueEventBuilder, IssueEventKind, IssueStatus};
 use mosaic_core::repo::{Repository, REPO_DIR};
 use mosaic_core::review::{ApprovalBuilder, CommentAnchor, CommentBuilder, Verdict};
 use mosaic_core::storage::Cas;
@@ -128,6 +129,9 @@ enum Cmd {
     },
     /// Print all review comments + approvals on a change in order.
     Review { change_id: String },
+    /// GitHub-style issue tracker.
+    #[command(subcommand)]
+    Issue(IssueCmd),
     /// Show working tree status vs. branch tip.
     Status {
         #[arg(short, long, default_value = "main")]
@@ -197,6 +201,13 @@ enum Cmd {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Roll a branch back past everything an agent did in a session.
+    /// Dropped changes stay in the DAG (recoverable; pruned by `mos gc`).
+    Rollback {
+        session_id: String,
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -215,6 +226,42 @@ enum AuditCmd {
 enum ImportCmd {
     /// Import a Git repository's history.
     Git { path: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum IssueCmd {
+    /// File a new issue (allocates the next number, signs locally).
+    Create {
+        #[arg(short, long)]
+        title: String,
+        #[arg(short, long, default_value = "")]
+        body: String,
+        /// Repeatable label, e.g. `--label bug --label p1`.
+        #[arg(short, long)]
+        label: Vec<String>,
+    },
+    /// List all issues with their current status.
+    List,
+    /// Show an issue and its event stream.
+    Show { number: u64 },
+    /// Add a comment to an issue.
+    Comment {
+        number: u64,
+        #[arg(short, long)]
+        body: String,
+    },
+    /// Close an issue.
+    Close { number: u64 },
+    /// Reopen a closed issue.
+    Reopen { number: u64 },
+    /// Add or remove a label on an issue.
+    Label {
+        number: u64,
+        #[arg(long)]
+        add: Option<String>,
+        #[arg(long)]
+        remove: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -329,6 +376,23 @@ fn main() -> ExitCode {
             run(|| approve_cmd(&change_id, Verdict::RequestedChanges, body.as_deref()))
         }
         Cmd::Review { change_id } => run(|| review_cmd(&change_id)),
+        Cmd::Issue(IssueCmd::Create { title, body, label }) => {
+            run(|| issue_create_cmd(&title, &body, &label))
+        }
+        Cmd::Issue(IssueCmd::List) => run(issue_list_cmd),
+        Cmd::Issue(IssueCmd::Show { number }) => run(|| issue_show_cmd(number)),
+        Cmd::Issue(IssueCmd::Comment { number, body }) => {
+            run(|| issue_comment_cmd(number, &body))
+        }
+        Cmd::Issue(IssueCmd::Close { number }) => {
+            run(|| issue_status_cmd(number, IssueStatus::Closed))
+        }
+        Cmd::Issue(IssueCmd::Reopen { number }) => {
+            run(|| issue_status_cmd(number, IssueStatus::Open))
+        }
+        Cmd::Issue(IssueCmd::Label { number, add, remove }) => {
+            run(|| issue_label_cmd(number, add.as_deref(), remove.as_deref()))
+        }
         Cmd::Status { branch } => run(|| status_cmd(&branch)),
         Cmd::Diff { path, branch } => run(|| diff_cmd(path.as_deref(), &branch)),
         Cmd::Add { paths, branch } => run(|| add_cmd(&paths, &branch)),
@@ -347,7 +411,29 @@ fn main() -> ExitCode {
         Cmd::Quickstart { email, name } => {
             run(|| quickstart_cmd(email.as_deref(), name.as_deref()))
         }
+        Cmd::Rollback { session_id, branch } => run(|| rollback_cmd(&session_id, &branch)),
     }
+}
+
+fn rollback_cmd(session_id: &str, branch: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let report = mosaic_core::rollback::rollback_session(&repo, branch, session_id)?;
+    if report.dropped.is_empty() {
+        println!("nothing to roll back: no changes found for session {session_id}");
+        return Ok(());
+    }
+    println!(
+        "rolled back session {session_id} on {branch}: dropped {} change(s)",
+        report.dropped.len()
+    );
+    for h in report.dropped.iter().take(20) {
+        println!("  - {}", &h.to_hex()[..12]);
+    }
+    println!(
+        "branch now has {} tip(s); dropped changes remain in the DAG until `mos gc`",
+        report.new_frontier.0.len()
+    );
+    Ok(())
 }
 
 fn run(f: impl FnOnce() -> Result<(), AppError>) -> ExitCode {
@@ -1170,6 +1256,128 @@ fn review_cmd(change_id_hex: &str) -> Result<(), AppError> {
                 );
             }
         }
+    }
+    Ok(())
+}
+
+fn issue_create_cmd(title: &str, body: &str, labels: &[String]) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let (identity, key) = repo.load_identity()?;
+    let issue = repo.create_issue(title, body, identity, key, labels.to_vec())?;
+    println!("opened issue #{}: {}", issue.number, issue.title);
+    if !issue.labels.is_empty() {
+        println!("  labels: {}", issue.labels.join(", "));
+    }
+    Ok(())
+}
+
+fn issue_list_cmd() -> Result<(), AppError> {
+    let repo = open_here()?;
+    let issues = repo.list_issues()?;
+    if issues.is_empty() {
+        println!("(no issues)");
+        return Ok(());
+    }
+    for issue in issues {
+        let status = repo.issue_status(issue.number)?;
+        let tag = match status {
+            IssueStatus::Open => "OPEN",
+            IssueStatus::Closed => "CLOSED",
+        };
+        println!(
+            "#{:<4} [{:<6}] {}  by {}",
+            issue.number,
+            tag,
+            issue.title,
+            issue.author.display()
+        );
+    }
+    Ok(())
+}
+
+fn issue_show_cmd(number: u64) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let issue = repo.get_issue(number)?;
+    let status = repo.issue_status(number)?;
+    let tag = match status {
+        IssueStatus::Open => "OPEN",
+        IssueStatus::Closed => "CLOSED",
+    };
+    println!("#{} [{}] {}", issue.number, tag, issue.title);
+    println!("opened by {}", issue.author.display());
+    if !issue.labels.is_empty() {
+        println!("labels: {}", issue.labels.join(", "));
+    }
+    if !issue.body.is_empty() {
+        println!();
+        println!("{}", issue.body);
+    }
+    let events = repo.issue_events(number)?;
+    if !events.is_empty() {
+        println!();
+        println!("--- activity ---");
+        for ev in events {
+            let who = ev.author.display();
+            match &ev.kind {
+                IssueEventKind::Comment { body } => println!("  {who} commented: {body}"),
+                IssueEventKind::StatusChanged { to } => {
+                    let s = match to {
+                        IssueStatus::Open => "reopened",
+                        IssueStatus::Closed => "closed",
+                    };
+                    println!("  {who} {s} this issue");
+                }
+                IssueEventKind::Labeled { label } => println!("  {who} added label {label}"),
+                IssueEventKind::Unlabeled { label } => println!("  {who} removed label {label}"),
+                IssueEventKind::Referenced { change } => {
+                    println!("  {who} referenced change {change}")
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn add_issue_event(number: u64, kind: IssueEventKind) -> Result<(), AppError> {
+    let repo = open_here()?;
+    // Ensure the issue exists before signing an event for it.
+    let _ = repo.get_issue(number)?;
+    let (identity, key) = repo.load_identity()?;
+    let event = IssueEventBuilder::new(number, identity, key, kind).build()?;
+    repo.add_issue_event(&event)?;
+    Ok(())
+}
+
+fn issue_comment_cmd(number: u64, body: &str) -> Result<(), AppError> {
+    add_issue_event(number, IssueEventKind::Comment { body: body.to_string() })?;
+    println!("commented on issue #{number}");
+    Ok(())
+}
+
+fn issue_status_cmd(number: u64, to: IssueStatus) -> Result<(), AppError> {
+    add_issue_event(number, IssueEventKind::StatusChanged { to })?;
+    match to {
+        IssueStatus::Open => println!("reopened issue #{number}"),
+        IssueStatus::Closed => println!("closed issue #{number}"),
+    }
+    Ok(())
+}
+
+fn issue_label_cmd(
+    number: u64,
+    add: Option<&str>,
+    remove: Option<&str>,
+) -> Result<(), AppError> {
+    if add.is_none() && remove.is_none() {
+        return Err(AppError::Msg("specify --add <label> or --remove <label>".into()));
+    }
+    if let Some(label) = add {
+        add_issue_event(number, IssueEventKind::Labeled { label: label.to_string() })?;
+        println!("added label {label} to issue #{number}");
+    }
+    if let Some(label) = remove {
+        add_issue_event(number, IssueEventKind::Unlabeled { label: label.to_string() })?;
+        println!("removed label {label} from issue #{number}");
     }
     Ok(())
 }

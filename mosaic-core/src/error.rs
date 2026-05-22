@@ -85,6 +85,15 @@ pub enum Error {
 
     #[error("review store: {0}")]
     ReviewStore(String),
+
+    #[error("invalid issue: {0}")]
+    InvalidIssue(String),
+
+    #[error("issue not found: {0}")]
+    IssueNotFound(u64),
+
+    #[error("issue store: {0}")]
+    IssueStore(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

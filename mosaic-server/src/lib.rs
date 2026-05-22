@@ -24,6 +24,7 @@ use axum::{
     Json, Router,
 };
 use mosaic_core::error::Error;
+use mosaic_core::issues::{Issue, IssueEvent, IssueStatus};
 use mosaic_core::m1::change::ChangeId;
 use mosaic_core::m1_dag::refs::Frontier;
 use mosaic_core::repo::Repository;
@@ -106,6 +107,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/bundle", post(post_bundle))
         .route("/api/v1/changes/:id/comments", get(list_comments).post(post_comment))
         .route("/api/v1/changes/:id/approvals", get(list_approvals).post(post_approval))
+        .route("/api/v1/issues", get(list_issues).post(post_issue))
+        .route("/api/v1/issues/:number", get(get_issue))
+        .route("/api/v1/issues/:number/events", post(post_issue_event))
         .route("/api/v1/live-stats", get(live_stats))
         .route("/ws/doc/:name", get(ws::ws_handler))
         .route("/ws/awareness/:name", get(awareness::awareness_handler))
@@ -569,6 +573,87 @@ async fn list_approvals(
     Ok(Json(repo.approvals_for(&ChangeId(h))?))
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct IssueSummary {
+    pub number: u64,
+    pub title: String,
+    pub status: IssueStatus,
+    pub author: String,
+}
+
+async fn list_issues(
+    State(s): State<Arc<AppState>>,
+) -> Result<Json<Vec<IssueSummary>>, AppError> {
+    let repo = s.open()?;
+    let mut out = Vec::new();
+    for issue in repo.list_issues()? {
+        let status = repo.issue_status(issue.number)?;
+        out.push(IssueSummary {
+            number: issue.number,
+            title: issue.title,
+            status,
+            author: issue.author.display(),
+        });
+    }
+    Ok(Json(out))
+}
+
+async fn post_issue(
+    State(s): State<Arc<AppState>>,
+    Json(issue): Json<Issue>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Verify the on-the-wire payload before persisting; reject tampering.
+    issue.verify()?;
+    let _guard = s.lock.lock().await;
+    let repo = s.open()?;
+    repo.put_issue(&issue)?;
+    Ok(Json(serde_json::json!({
+        "number": issue.number,
+        "id": issue.id().to_hex(),
+    })))
+}
+
+#[derive(Serialize)]
+struct IssueDetail {
+    issue: Issue,
+    status: IssueStatus,
+    events: Vec<IssueEvent>,
+}
+
+async fn get_issue(
+    State(s): State<Arc<AppState>>,
+    Path(number): Path<u64>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let repo = s.open()?;
+    let issue = repo.get_issue(number)?;
+    let events = repo.issue_events(number)?;
+    let status = repo.issue_status(number)?;
+    let detail = IssueDetail {
+        issue,
+        status,
+        events,
+    };
+    Ok(Json(serde_json::to_value(detail).map_err(|e| {
+        AppError::Core(Error::IssueStore(e.to_string()))
+    })?))
+}
+
+async fn post_issue_event(
+    State(s): State<Arc<AppState>>,
+    Path(number): Path<u64>,
+    Json(event): Json<IssueEvent>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if event.number != number {
+        return Err(AppError::Forbidden(
+            "event.number does not match URL".into(),
+        ));
+    }
+    let _guard = s.lock.lock().await;
+    let repo = s.open()?;
+    repo.add_issue_event(&event)?;
+    Ok(Json(serde_json::json!({ "id": event.id().to_hex() })))
+}
+
 fn parse_have(s: &str) -> Result<Frontier, AppError> {
     let mut set = BTreeSet::new();
     if s.trim().is_empty() {
@@ -612,6 +697,12 @@ impl IntoResponse for AppError {
             }
             AppError::Core(Error::InvalidApproval(m)) => {
                 (StatusCode::BAD_REQUEST, format!("invalid approval: {m}"))
+            }
+            AppError::Core(Error::InvalidIssue(m)) => {
+                (StatusCode::BAD_REQUEST, format!("invalid issue: {m}"))
+            }
+            AppError::Core(Error::IssueNotFound(n)) => {
+                (StatusCode::NOT_FOUND, format!("issue not found: {n}"))
             }
             AppError::Forbidden(s) => (StatusCode::FORBIDDEN, s.clone()),
             other => (StatusCode::INTERNAL_SERVER_ERROR, format!("{other}")),
@@ -1393,6 +1484,94 @@ mod tests {
 
         // GET still returns empty list — nothing was persisted.
         let listed: Vec<Comment> = reqwest::get(&url).await.unwrap().json().await.unwrap();
+        assert!(listed.is_empty());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn http_post_then_get_issue_roundtrip() {
+        use mosaic_core::issues::IssueBuilder;
+        use mosaic_core::m1::change::Tai64N;
+
+        let dir = TempDir::new().unwrap();
+        let _ = Repository::init(dir.path()).unwrap();
+
+        let (addr, handle) =
+            serve(dir.path(), "127.0.0.1:0".parse().unwrap()).await.unwrap();
+
+        let author_key = SigningKey::generate();
+        let author = Identity::human("filer@example.com", Some("Filer".into())).unwrap();
+        let issue = IssueBuilder::new(1, author, author_key)
+            .ts(Tai64N(1234, 0))
+            .title("login crashes")
+            .body("repro steps")
+            .label("bug")
+            .build()
+            .unwrap();
+
+        let url = format!("http://{addr}/api/v1/issues");
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .json(&issue)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["number"].as_u64().unwrap(), 1);
+
+        // List shows the issue with Open status.
+        let listed: Vec<IssueSummary> = reqwest::get(&url).await.unwrap().json().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].number, 1);
+        assert_eq!(listed[0].title, "login crashes");
+        assert_eq!(listed[0].status, IssueStatus::Open);
+
+        // GET it back with its (empty) event stream.
+        let detail_url = format!("http://{addr}/api/v1/issues/1");
+        let detail: serde_json::Value =
+            reqwest::get(&detail_url).await.unwrap().json().await.unwrap();
+        assert_eq!(detail["issue"]["title"], "login crashes");
+        assert_eq!(detail["status"], "Open");
+        assert!(detail["events"].as_array().unwrap().is_empty());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn http_rejects_tampered_issue_with_403() {
+        use mosaic_core::issues::IssueBuilder;
+        use mosaic_core::m1::change::Tai64N;
+
+        let dir = TempDir::new().unwrap();
+        let _ = Repository::init(dir.path()).unwrap();
+
+        let (addr, handle) =
+            serve(dir.path(), "127.0.0.1:0".parse().unwrap()).await.unwrap();
+
+        let author_key = SigningKey::generate();
+        let author = Identity::human("filer@example.com", Some("Filer".into())).unwrap();
+        let mut issue = IssueBuilder::new(1, author, author_key)
+            .ts(Tai64N(1234, 0))
+            .title("original")
+            .body("body")
+            .build()
+            .unwrap();
+        // Tamper after signing — payload no longer matches the signature.
+        issue.title = "TAMPERED".into();
+
+        let url = format!("http://{addr}/api/v1/issues");
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .json(&issue)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Nothing was persisted.
+        let listed: Vec<IssueSummary> = reqwest::get(&url).await.unwrap().json().await.unwrap();
         assert!(listed.is_empty());
 
         handle.abort();

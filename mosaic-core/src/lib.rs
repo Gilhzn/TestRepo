@@ -9,6 +9,7 @@ pub mod crdt;
 pub mod error;
 pub mod hash;
 pub mod import_git;
+pub mod issues;
 pub mod m1;
 pub mod m1_dag;
 pub mod m1_patch;
@@ -25,6 +26,7 @@ pub mod gc;
 pub mod audit;
 pub mod encryption;
 pub mod git_export;
+pub mod rollback;
 
 pub use error::Error;
 pub use hash::Hash;

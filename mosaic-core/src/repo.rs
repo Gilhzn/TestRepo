@@ -18,6 +18,7 @@ use crate::m1::signing::SigningKey;
 use crate::m1_dag::dag::{ChangeStore, DagIndex};
 use crate::m1_dag::refs::{Frontier, RefStore};
 use crate::m1_dag::vclock::VectorClock;
+use crate::issues::{Issue, IssueBuilder, IssueEvent, IssueEventKind, IssueStatus};
 use crate::review::{Approval, Comment};
 use crate::storage::FsCas;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +33,8 @@ const IDENTITY: &str = "identity";
 const REVIEWS: &str = "reviews";
 const REVIEW_COMMENTS: &str = "comments";
 const REVIEW_APPROVALS: &str = "approvals";
+const ISSUES: &str = "issues";
+const ISSUE_COUNTER: &str = ".next";
 const HEAD_REF: &str = "main";
 
 pub struct Repository {
@@ -247,6 +250,165 @@ impl Repository {
             out.push(a);
         }
         Ok(out)
+    }
+
+    fn issues_dir(&self) -> PathBuf {
+        self.root.join(ISSUES)
+    }
+
+    fn issue_path(&self, number: u64) -> PathBuf {
+        self.issues_dir().join(format!("{number}.json"))
+    }
+
+    fn issue_events_path(&self, number: u64) -> PathBuf {
+        self.issues_dir().join(format!("{number}.events.jsonl"))
+    }
+
+    /// Read-modify-write the monotonic issue counter, returning the freshly
+    /// allocated number (1-based).
+    fn next_issue_number(&self) -> Result<u64> {
+        let dir = self.issues_dir();
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(ISSUE_COUNTER);
+        let current: u64 = if path.exists() {
+            let raw = fs::read_to_string(&path)?;
+            raw.trim()
+                .parse()
+                .map_err(|e| Error::IssueStore(format!("corrupt issue counter: {e}")))?
+        } else {
+            0
+        };
+        let next = current + 1;
+        let tmp = path.with_extension("tmp");
+        fs::write(&tmp, next.to_string())?;
+        fs::rename(&tmp, &path)?;
+        Ok(next)
+    }
+
+    pub fn create_issue(
+        &self,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        author: Identity,
+        key: SigningKey,
+        labels: Vec<String>,
+    ) -> Result<Issue> {
+        let number = self.next_issue_number()?;
+        let issue = IssueBuilder::new(number, author, key)
+            .title(title)
+            .body(body)
+            .labels(labels)
+            .build()?;
+        issue.verify()?;
+        let line = serde_json::to_string(&issue)
+            .map_err(|e| Error::IssueStore(e.to_string()))?;
+        let path = self.issue_path(number);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, line)?;
+        Ok(issue)
+    }
+
+    /// Persist a pre-signed [`Issue`] (e.g. one received over the network)
+    /// under its own number after verifying its signature. Unlike
+    /// [`create_issue`](Self::create_issue) this does not allocate a new
+    /// number; it trusts the issue's own `number`.
+    pub fn put_issue(&self, issue: &Issue) -> Result<()> {
+        issue.verify()?;
+        let line = serde_json::to_string(issue)
+            .map_err(|e| Error::IssueStore(e.to_string()))?;
+        let path = self.issue_path(issue.number);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, line)?;
+        Ok(())
+    }
+
+    pub fn add_issue_event(&self, event: &IssueEvent) -> Result<()> {
+        event.verify()?;
+        // Reject events that reference a non-existent issue.
+        if !self.issue_path(event.number).exists() {
+            return Err(Error::IssueNotFound(event.number));
+        }
+        let line = serde_json::to_string(event)
+            .map_err(|e| Error::IssueStore(e.to_string()))?;
+        let path = self.issue_events_path(event.number);
+        Self::append_jsonl(&path, &line)?;
+        Ok(())
+    }
+
+    pub fn get_issue(&self, number: u64) -> Result<Issue> {
+        let path = self.issue_path(number);
+        if !path.exists() {
+            return Err(Error::IssueNotFound(number));
+        }
+        let raw = fs::read_to_string(&path)?;
+        let issue: Issue = serde_json::from_str(&raw)
+            .map_err(|e| Error::IssueStore(e.to_string()))?;
+        Ok(issue)
+    }
+
+    pub fn issue_events(&self, number: u64) -> Result<Vec<IssueEvent>> {
+        let path = self.issue_events_path(number);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = fs::File::open(&path)?;
+        let reader = BufReader::new(file);
+        let mut out = Vec::new();
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let e: IssueEvent = serde_json::from_str(&line)
+                .map_err(|e| Error::IssueStore(e.to_string()))?;
+            out.push(e);
+        }
+        Ok(out)
+    }
+
+    pub fn list_issues(&self) -> Result<Vec<Issue>> {
+        let dir = self.issues_dir();
+        let mut out = Vec::new();
+        if !dir.exists() {
+            return Ok(out);
+        }
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = match name.to_str() {
+                Some(n) => n,
+                None => continue,
+            };
+            // Issue documents are "<number>.json"; skip events + counter.
+            let number = match name.strip_suffix(".json") {
+                Some(stem) => match stem.parse::<u64>() {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                },
+                None => continue,
+            };
+            out.push(self.get_issue(number)?);
+        }
+        out.sort_by_key(|i| i.number);
+        Ok(out)
+    }
+
+    pub fn issue_status(&self, number: u64) -> Result<IssueStatus> {
+        if !self.issue_path(number).exists() {
+            return Err(Error::IssueNotFound(number));
+        }
+        let events = self.issue_events(number)?;
+        let mut status = IssueStatus::Open;
+        for event in &events {
+            if let IssueEventKind::StatusChanged { to } = &event.kind {
+                status = *to;
+            }
+        }
+        Ok(status)
     }
 
     pub fn save_identity(&self, identity: &Identity, signing_key: &SigningKey) -> Result<()> {
