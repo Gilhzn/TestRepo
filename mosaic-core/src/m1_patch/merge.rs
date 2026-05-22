@@ -151,7 +151,16 @@ pub fn three_way_merge(
 ) -> Result<MergeResult> {
     let mut graph = base.clone();
     ours.apply(&mut graph)?;
-    theirs.apply(&mut graph)?;
+    // Identical concurrent inserts derive the *same* content-addressed
+    // VertexId on both sides. After applying `ours`, any such vertex already
+    // exists, so re-inserting it from `theirs` would abort the patch
+    // ("vertex already exists"). Content-addressing makes that insert
+    // idempotent — both sides added the same line, so it belongs once — so we
+    // drop the duplicate before applying. Inserts with *different* content
+    // keep distinct ids and are still applied (and reported below as a
+    // ConcurrentInsert conflict).
+    let theirs_applicable = drop_inserts_present_in(theirs, &graph);
+    theirs_applicable.apply(&mut graph)?;
 
     let mut conflicts = Vec::new();
 
@@ -209,6 +218,22 @@ pub fn three_way_merge(
     }
 
     Ok(MergeResult { graph, conflicts })
+}
+
+/// Return a copy of `patch` with every `InsertAfter` whose vertex already
+/// exists in `graph` removed. Used to make identical concurrent inserts
+/// idempotent during merge (they share a content-addressed id).
+fn drop_inserts_present_in(patch: &Patch, graph: &LineGraph) -> Patch {
+    let ops = patch
+        .ops
+        .iter()
+        .filter(|op| match op {
+            Op::InsertAfter { vertex, .. } => !graph.contains(&vertex.id),
+            _ => true,
+        })
+        .cloned()
+        .collect();
+    Patch::from_ops(ops)
 }
 
 fn kill_targets(p: &Patch) -> BTreeSet<VertexId> {

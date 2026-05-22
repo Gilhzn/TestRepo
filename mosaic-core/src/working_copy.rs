@@ -78,6 +78,18 @@ pub struct StatusEntry {
     pub staged: bool,
 }
 
+/// A file whose content diverged across frontier tips and was auto-merged
+/// during snapshot/checkout (instead of one tip silently overwriting another).
+#[derive(Debug, Clone)]
+pub struct MergeNote {
+    pub path: String,
+    /// Line-level structured conflicts carried by the union merge (0 = clean).
+    pub conflicts: usize,
+    /// True when the file couldn't be text-merged (binary / non-UTF-8) and one
+    /// tip's bytes were kept verbatim.
+    pub binary: bool,
+}
+
 pub struct WorkingCopy<'a> {
     repo: &'a Repository,
     root: PathBuf,
@@ -95,18 +107,81 @@ impl<'a> WorkingCopy<'a> {
         &self.root
     }
 
-    /// Build a map of path -> content from the latest reachable change set
-    /// of `branch` — the "branch tip" against which we diff.
+    /// Build a map of path -> content for `branch` — the "branch tip" against
+    /// which we diff and that `checkout` materializes.
+    ///
+    /// When the frontier has a single tip this is a plain linear
+    /// materialization. When it has **multiple tips** (parallel work that
+    /// hasn't been linearized), files that diverge across tips are 3-way merged
+    /// rather than last-writer-wins, so no tip's work is silently dropped.
     pub fn branch_snapshot(&self, branch: &str) -> Result<BTreeMap<String, Vec<u8>>> {
+        Ok(self.branch_snapshot_merged(branch)?.0)
+    }
+
+    /// Like [`branch_snapshot`](Self::branch_snapshot), but also returns a note
+    /// for every path that diverged across frontier tips and had to be merged.
+    pub fn branch_snapshot_merged(
+        &self,
+        branch: &str,
+    ) -> Result<(BTreeMap<String, Vec<u8>>, Vec<MergeNote>)> {
         let frontier = match self.repo.refs().get(branch) {
             Ok(f) => f,
-            Err(Error::RefNotFound(_)) => return Ok(BTreeMap::new()),
+            Err(Error::RefNotFound(_)) => return Ok((BTreeMap::new(), Vec::new())),
             Err(e) => return Err(e),
         };
+        let tips: Vec<crate::Hash> = frontier.0.iter().copied().collect();
 
+        // Single tip (or empty): linear materialization, no divergence possible.
+        if tips.len() <= 1 {
+            return Ok((self.snapshot_over(&self.ancestor_set(&tips))?, Vec::new()));
+        }
+
+        // Multi-tip: materialize each tip independently, then merge per path so
+        // concurrent same-file edits combine instead of overwriting each other.
+        let tip_ancestors: Vec<BTreeSet<crate::Hash>> = tips
+            .iter()
+            .map(|t| self.ancestor_set(std::slice::from_ref(t)))
+            .collect();
+        let tip_snaps: Vec<BTreeMap<String, Vec<u8>>> = tip_ancestors
+            .iter()
+            .map(|a| self.snapshot_over(a))
+            .collect::<Result<_>>()?;
+
+        // Merge base = changes common to every tip.
+        let mut base_set = tip_ancestors[0].clone();
+        for a in &tip_ancestors[1..] {
+            base_set.retain(|h| a.contains(h));
+        }
+        let base_snap = self.snapshot_over(&base_set)?;
+
+        let mut all_paths: BTreeSet<String> = BTreeSet::new();
+        for s in &tip_snaps {
+            all_paths.extend(s.keys().cloned());
+        }
+
+        let mut out: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut notes: Vec<MergeNote> = Vec::new();
+        for path in all_paths {
+            let versions: Vec<&Vec<u8>> = tip_snaps.iter().filter_map(|s| s.get(&path)).collect();
+            if versions.is_empty() {
+                continue;
+            }
+            if versions.iter().all(|v| *v == versions[0]) {
+                out.insert(path, versions[0].clone());
+                continue;
+            }
+            let base = base_snap.get(&path).cloned().unwrap_or_default();
+            let (content, note) = self.merge_versions(&path, &base, &versions);
+            out.insert(path, content);
+            notes.push(note);
+        }
+        Ok((out, notes))
+    }
+
+    /// All changes reachable from `tips` (inclusive).
+    fn ancestor_set(&self, tips: &[crate::Hash]) -> BTreeSet<crate::Hash> {
         let mut ancestors: BTreeSet<crate::Hash> = BTreeSet::new();
-        let mut queue: std::collections::VecDeque<crate::Hash> =
-            frontier.0.iter().copied().collect();
+        let mut queue: std::collections::VecDeque<crate::Hash> = tips.iter().copied().collect();
         while let Some(h) = queue.pop_front() {
             if !ancestors.insert(h) {
                 continue;
@@ -117,8 +192,14 @@ impl<'a> WorkingCopy<'a> {
                 }
             }
         }
+        ancestors
+    }
 
-        let ordered = self.repo.topo_order(&ancestors);
+    /// Materialize a set of changes (last-writer-wins over topo order). Correct
+    /// for a single linear lineage; multi-tip divergence is handled by the
+    /// caller via [`merge_versions`](Self::merge_versions).
+    fn snapshot_over(&self, set: &BTreeSet<crate::Hash>) -> Result<BTreeMap<String, Vec<u8>>> {
+        let ordered = self.repo.topo_order(set);
         let mut snapshot: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         for h in ordered {
             let change = self.repo.load_change(&ChangeId(h))?;
@@ -129,16 +210,69 @@ impl<'a> WorkingCopy<'a> {
         Ok(snapshot)
     }
 
+    /// 3-way merge the divergent `versions` of one path against `base`, folding
+    /// pairwise. Text files are unioned through the patch+semantic engine (both
+    /// sides kept; conflicts counted but never dropped). Binary / non-UTF-8
+    /// files can't be text-merged, so the first tip's bytes are kept and the
+    /// note is flagged binary for the caller to surface.
+    fn merge_versions(
+        &self,
+        path: &str,
+        base: &[u8],
+        versions: &[&Vec<u8>],
+    ) -> (Vec<u8>, MergeNote) {
+        let utf8_ok = std::str::from_utf8(base).is_ok()
+            && versions.iter().all(|v| std::str::from_utf8(v).is_ok());
+        if !utf8_ok {
+            return (
+                versions[0].to_vec(),
+                MergeNote {
+                    path: path.to_string(),
+                    conflicts: 0,
+                    binary: true,
+                },
+            );
+        }
+        let lang = crate::ast::Lang::from_path(path);
+        let creator = crate::Hash::of(format!("checkout-merge:{path}").as_bytes());
+        let base_s = String::from_utf8_lossy(base).into_owned();
+        let mut acc = String::from_utf8_lossy(versions[0]).into_owned();
+        let mut conflicts = 0usize;
+        for v in &versions[1..] {
+            let theirs = String::from_utf8_lossy(v).into_owned();
+            match crate::merge_strategies::merge_text_file(&creator, lang, &base_s, &acc, &theirs) {
+                Ok(fm) => {
+                    conflicts += fm.patch_conflicts.len();
+                    acc = fm.merged_lines.join("\n");
+                    if !acc.is_empty() {
+                        acc.push('\n');
+                    }
+                }
+                Err(_) => conflicts += 1,
+            }
+        }
+        (
+            acc.into_bytes(),
+            MergeNote {
+                path: path.to_string(),
+                conflicts,
+                binary: false,
+            },
+        )
+    }
+
     /// Materialize a branch's files into the working tree, honoring an
-    /// optional sparse profile. Returns the list of paths written. Files
-    /// excluded by the sparse profile are skipped (not written to disk),
-    /// which is the whole point of sparse checkout in a monorepo.
+    /// optional sparse profile. Returns `(written paths, merge notes)`. When
+    /// the branch frontier has multiple tips, divergent files are auto-merged
+    /// (see [`branch_snapshot_merged`](Self::branch_snapshot_merged)) and the
+    /// notes report which paths were merged and whether they carry conflicts.
+    /// Files excluded by the sparse profile are skipped (not written to disk).
     pub fn checkout(
         &self,
         branch: &str,
         sparse: &crate::sparse::SparseProfile,
-    ) -> Result<Vec<String>> {
-        let snapshot = self.branch_snapshot(branch)?;
+    ) -> Result<(Vec<String>, Vec<MergeNote>)> {
+        let (snapshot, notes) = self.branch_snapshot_merged(branch)?;
         let mut written = Vec::new();
         for (path, bytes) in &snapshot {
             if !sparse.includes(path) {
@@ -152,7 +286,12 @@ impl<'a> WorkingCopy<'a> {
             written.push(path.clone());
         }
         written.sort();
-        Ok(written)
+        // Only report notes for paths that were actually written.
+        let notes = notes
+            .into_iter()
+            .filter(|n| sparse.includes(&n.path))
+            .collect();
+        Ok((written, notes))
     }
 
     /// Walk every file under `root` (skipping `.mosaic/` and a small set of
@@ -487,7 +626,7 @@ mod tests {
 
         let repo = Repository::open(dir.path()).unwrap();
         let wc = WorkingCopy::open(&repo, dir.path());
-        let written = wc
+        let (written, _notes) = wc
             .checkout("main", &crate::sparse::SparseProfile::default())
             .unwrap();
         assert_eq!(written.len(), 2);
@@ -495,6 +634,80 @@ mod tests {
             std::fs::read(dir.path().join("src/main.rs")).unwrap(),
             b"fn main(){}"
         );
+    }
+
+    #[test]
+    fn checkout_merges_concurrent_same_file_edits_across_tips() {
+        // Regression for the dogfooding finding: two agents editing the same
+        // file on a multi-tip frontier must BOTH survive checkout — the old
+        // last-writer-wins silently dropped one.
+        let dir = TempDir::new().unwrap();
+        let mut repo = Repository::init(dir.path()).unwrap();
+        let (idn, key) = human();
+
+        let base = repo
+            .commit(
+                ChangeBuilder::new(idn.clone(), key.clone())
+                    .intent("base")
+                    .file(FileChange {
+                        path: "app.py".into(),
+                        kind: FileKind::Text,
+                        patch: b"def main():\n    pass\n".to_vec(),
+                        conflicts: Vec::new(),
+                    })
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        repo.advance_branch("main", base).unwrap();
+
+        // Agent A: add an `add()` call. Agent B: add a `list()` call. Both
+        // descend from `base` (concurrent), both edit app.py.
+        let a = repo
+            .commit(
+                ChangeBuilder::new(idn.clone(), key.clone())
+                    .intent("agent-a: add")
+                    .dep(base)
+                    .file(FileChange {
+                        path: "app.py".into(),
+                        kind: FileKind::Text,
+                        patch: b"def main():\n    add()\n    pass\n".to_vec(),
+                        conflicts: Vec::new(),
+                    })
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        let b = repo
+            .commit(
+                ChangeBuilder::new(idn, key)
+                    .intent("agent-b: list")
+                    .dep(base)
+                    .file(FileChange {
+                        path: "app.py".into(),
+                        kind: FileKind::Text,
+                        patch: b"def main():\n    list()\n    pass\n".to_vec(),
+                        conflicts: Vec::new(),
+                    })
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        repo.advance_branch("main", a).unwrap();
+        repo.advance_branch("main", b).unwrap();
+        // main is now a 2-tip frontier.
+        assert_eq!(repo.refs().get("main").unwrap().0.len(), 2);
+
+        let wc = WorkingCopy::open(&repo, dir.path());
+        let (_written, notes) = wc
+            .checkout("main", &crate::sparse::SparseProfile::default())
+            .unwrap();
+        let merged = std::fs::read_to_string(dir.path().join("app.py")).unwrap();
+        // Neither agent's work was dropped.
+        assert!(merged.contains("add()"), "agent-a's edit was dropped:\n{merged}");
+        assert!(merged.contains("list()"), "agent-b's edit was dropped:\n{merged}");
+        // The divergence was reported, not silent.
+        assert!(notes.iter().any(|n| n.path == "app.py"));
     }
 
     #[test]
@@ -517,7 +730,7 @@ mod tests {
             include: vec!["payments/**".into()],
             exclude: vec![],
         };
-        let written = wc.checkout("main", &profile).unwrap();
+        let (written, _notes) = wc.checkout("main", &profile).unwrap();
         assert_eq!(written, vec!["payments/api.rs".to_string()]);
         assert!(dir.path().join("payments/api.rs").exists());
         assert!(!dir.path().join("billing/api.rs").exists());

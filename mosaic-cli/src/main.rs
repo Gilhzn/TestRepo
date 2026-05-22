@@ -949,7 +949,7 @@ fn checkout_cmd(branch: &str) -> Result<(), AppError> {
     let repo = Repository::open(&root)?;
     let wc = mosaic_core::working_copy::WorkingCopy::open(&repo, &root);
     let profile = mosaic_core::sparse::SparseProfile::load(&root)?;
-    let written = wc.checkout(branch, &profile)?;
+    let (written, merges) = wc.checkout(branch, &profile)?;
     println!(
         "checked out {} file(s) from {branch}{}",
         written.len(),
@@ -960,6 +960,24 @@ fn checkout_cmd(branch: &str) -> Result<(), AppError> {
     }
     if written.len() > 30 {
         println!("  ... and {} more", written.len() - 30);
+    }
+    if !merges.is_empty() {
+        println!(
+            "\nmerged {} file(s) across parallel branch tips (no work dropped):",
+            merges.len()
+        );
+        for n in &merges {
+            if n.binary {
+                println!("  {} — binary, kept one tip's version (review manually)", n.path);
+            } else if n.conflicts == 0 {
+                println!("  {} — clean auto-merge", n.path);
+            } else {
+                println!(
+                    "  {} — {} conflict(s) kept as data; resolve with `mos resolve {}`",
+                    n.path, n.conflicts, n.path
+                );
+            }
+        }
     }
     Ok(())
 }

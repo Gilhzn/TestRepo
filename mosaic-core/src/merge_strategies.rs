@@ -380,6 +380,38 @@ mod tests {
     }
 
     #[test]
+    fn identical_line_on_both_sides_does_not_crash_and_dedupes() {
+        // Regression: both sides insert the *same* line ("SHARED"). They derive
+        // the same content-addressed VertexId, which used to abort the merge
+        // with "vertex already exists". It must now merge cleanly, keeping the
+        // shared line exactly once.
+        let base = "alpha\nbeta\n";
+        let ours = "alpha\nOURS\nSHARED\nbeta\n";
+        let theirs = "alpha\nTHEIRS\nSHARED\nbeta\n";
+        let creator = Hash::of(b"identical-line");
+        let result = merge_text_file(&creator, None, base, ours, theirs)
+            .expect("merge must not crash on identical concurrent inserts");
+        let shared = result.merged_lines.iter().filter(|l| *l == "SHARED").count();
+        assert_eq!(shared, 1, "shared line should appear once, got {shared}");
+        assert!(result.merged_lines.iter().any(|l| l == "OURS"));
+        assert!(result.merged_lines.iter().any(|l| l == "THEIRS"));
+    }
+
+    #[test]
+    fn identical_block_on_both_sides_merges_to_single_copy() {
+        // Two agents independently add the same closing line — extremely common
+        // (e.g. `return 0`, `}`). Must not crash; the line stays once.
+        let base = "fn main() {\n}\n";
+        let ours = "fn main() {\n    a();\n    return 0;\n}\n";
+        let theirs = "fn main() {\n    b();\n    return 0;\n}\n";
+        let creator = Hash::of(b"identical-block");
+        let result = merge_text_file(&creator, Some(Lang::Rust), base, ours, theirs)
+            .expect("merge must not crash");
+        let returns = result.merged_lines.iter().filter(|l| l.contains("return 0")).count();
+        assert_eq!(returns, 1, "return line should appear once, got {returns}");
+    }
+
+    #[test]
     fn python_three_way_merge() {
         let base = "def make_user(name):\n    return name\n";
         let ours = "def create_user(name):\n    return name\n";

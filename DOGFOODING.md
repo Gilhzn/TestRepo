@@ -110,7 +110,7 @@ has a reproduced command behind it.
 
 The **core thesis holds**: divergent parallel authorship as first-class data,
 signed provenance, and conflict-as-data for disjoint edits all work and feel
-better than Git. The **storage/DAG/merge engine is sound** (365 tests).
+better than Git. The **storage/DAG/merge engine is sound** (368 tests).
 
 The gap is **product plumbing, not architecture**. Today an agent fleet can
 commit in parallel safely, but the "they all merge cleanly and automatically"
@@ -134,3 +134,33 @@ crashes on common identical-line cases.
 Until #1 and #2 land, hold off on wide distribution — the first thing a new
 user does is exactly what broke here (two agents edit one file). Fixing them is
 days of work, not a rearchitecture.
+
+---
+
+## Fixes landed (2026-05-22, follow-up)
+
+The two **critical** findings (#1 and #2 above) are now fixed and regression-tested.
+
+1. **Identical-line merge crash — FIXED.** `three_way_merge` now treats an
+   insert whose content-addressed `VertexId` already exists (the same line
+   added on both sides) as idempotent and drops the duplicate before applying,
+   instead of aborting. Identical concurrent additions dedupe to one line;
+   differing ones still surface as a `ConcurrentInsert`. The previously-crashing
+   `mos merge` now yields a clean result with `shared_line` kept exactly once.
+   Tests: `merge_strategies::identical_line_on_both_sides_does_not_crash_and_dedupes`,
+   `identical_block_on_both_sides_merges_to_single_copy`.
+
+2. **`checkout` silently dropping concurrent same-file work — FIXED.**
+   `branch_snapshot` is now merge-aware: on a multi-tip frontier it materializes
+   each tip independently and 3-way merges divergent files (union, against the
+   common-ancestor base) instead of last-writer-wins. `checkout` returns
+   `MergeNote`s and the CLI prints e.g.
+   `merged 2 file(s) across parallel branch tips (no work dropped)` and points
+   at `mos resolve` for any conflicts. Re-running the exact dogfood scenario,
+   `todo.py` now contains **both** `add` and `list`. Binary/non-UTF-8 files keep
+   one tip's bytes and are flagged for manual review. Test:
+   `working_copy::checkout_merges_concurrent_same_file_edits_across_tips`.
+
+The remaining gaps (#3 `mos clone`/branch-level merge, #4 bundle-default branch
+refs, #5 `commit -m` alias) are ergonomics, not correctness, and are still open.
+Test suite: **368** (356 Rust + 6 TS + 6 Python).
