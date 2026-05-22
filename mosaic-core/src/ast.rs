@@ -85,6 +85,12 @@ impl AstTree {
         &self.source
     }
 
+    /// The root tree-sitter node. Exposed so structural-diff layers (e.g.
+    /// `gumtree`) can walk the parse tree directly.
+    pub fn root_node(&self) -> Node<'_> {
+        self.tree.root_node()
+    }
+
     pub fn root_hash(&self) -> Hash {
         node_hash(self.tree.root_node(), &self.source)
     }

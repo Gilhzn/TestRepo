@@ -27,13 +27,15 @@ Features every developer reaches for that Mosaic doesn't have yet.
   prefixes against the repo (ambiguity-checked).
 - ⬜ **Conflict resolution** — `mos resolve <change>` to inspect structured
   conflicts and pick a side / write a resolution change; web UI affordance.
-- ⬜ **Hooks** — pre-commit / post-commit / pre-push hook execution from
-  `.mosaic/hooks/`.
+- ✅ **Hooks** (`mosaic-core::hooks`) — pre-commit/post-commit (+ generic
+  pre-/post-) from `.mosaic/hooks/`; pre-hooks gate, post-hooks advisory,
+  env context; wired into `mos commit` (6 tests).
 
 ## M9 — Advanced engine
 
-- ⬜ **Full GumTree** — proper AST tree-diff with move/copy detection,
-  replacing the body-hash rename heuristic (M5's research-grade item).
+- ✅ **Full GumTree** (`mosaic-core::gumtree`) — AST tree-diff with
+  Match/Insert/Delete/Update/Move classification + `hints_from_script`
+  bridge to SemanticHint (8 tests).
 - ✅ **`mos bisect start/good/bad/status/reset`** — binary-search the change
   DAG for a regression, state persisted in `.mosaic/bisect.json` (6 tests).
 - ⬜ **Server push notifications (SSE)** — `/api/v1/events` server-sent
@@ -47,4 +49,4 @@ Features every developer reaches for that Mosaic doesn't have yet.
 
 ---
 
-## Current test count: **329 / 329 passing** (317 Rust + 6 TS + 6 Python)
+## Current test count: **343 / 343 passing** (331 Rust + 6 TS + 6 Python)

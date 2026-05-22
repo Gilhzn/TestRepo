@@ -1097,12 +1097,30 @@ fn commit(
         eprintln!("  (--allow-secrets given; committing anyway)");
     }
 
+    // pre-commit hook gate.
+    {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("MOSAIC_BRANCH".to_string(), branch.to_string());
+        env.insert("MOSAIC_INTENT".to_string(), intent.to_string());
+        let outcome = mosaic_core::hooks::run_gating(&root, "pre-commit", &env)?;
+        if outcome.ran && !outcome.stdout.trim().is_empty() {
+            print!("{}", outcome.stdout);
+        }
+    }
+
     for fc in file_changes {
         builder = builder.file(fc);
     }
     let change = builder.build()?;
     let id = repo.commit(change)?;
     repo.advance_branch(branch, id)?;
+    // post-commit hook (advisory).
+    {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("MOSAIC_BRANCH".to_string(), branch.to_string());
+        env.insert("MOSAIC_CHANGE".to_string(), id.to_hex());
+        let _ = mosaic_core::hooks::run(&root, "post-commit", &env);
+    }
     // Clear the staged index after a successful commit.
     if files.is_empty() {
         let mut index = mosaic_core::working_copy::StagedIndex::load(&root)?;

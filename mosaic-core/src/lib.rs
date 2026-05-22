@@ -35,6 +35,8 @@ pub mod reflog;
 pub mod bisect;
 pub mod stash;
 pub mod tags;
+pub mod gumtree;
+pub mod hooks;
 
 pub use error::Error;
 pub use hash::Hash;
