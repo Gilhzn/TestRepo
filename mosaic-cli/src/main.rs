@@ -242,6 +242,19 @@ enum Cmd {
     /// Binary-search the change DAG for a regression.
     #[command(subcommand)]
     Bisect(BisectCmd),
+    /// Pack the whole repo into one compressed archive / restore from one.
+    #[command(subcommand)]
+    Pack(PackCmd),
+}
+
+#[derive(Subcommand)]
+enum PackCmd {
+    /// Write a zstd-compressed archive of all changes + blobs.
+    Create { out: PathBuf },
+    /// Restore changes + blobs from an archive into this repo.
+    Restore { path: PathBuf },
+    /// Inspect an archive without restoring.
+    Inspect { path: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -566,7 +579,49 @@ fn main() -> ExitCode {
         Cmd::Bisect(BisectCmd::Bad) => run(|| bisect_mark_cmd(true)),
         Cmd::Bisect(BisectCmd::Status) => run(bisect_status_cmd),
         Cmd::Bisect(BisectCmd::Reset) => run(bisect_reset_cmd),
+        Cmd::Pack(PackCmd::Create { out }) => run(|| pack_create_cmd(&out)),
+        Cmd::Pack(PackCmd::Restore { path }) => run(|| pack_restore_cmd(&path)),
+        Cmd::Pack(PackCmd::Inspect { path }) => run(|| pack_inspect_cmd(&path)),
     }
+}
+
+fn pack_create_cmd(out: &PathBuf) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let pack = mosaic_core::pack::pack_repo(&repo)?;
+    let bytes = pack.encode()?;
+    fs::write(out, &bytes)?;
+    println!(
+        "wrote {} ({} changes, {} blobs, {} bytes compressed)",
+        out.display(),
+        pack.change_count(),
+        pack.blob_count(),
+        bytes.len()
+    );
+    Ok(())
+}
+
+fn pack_restore_cmd(path: &PathBuf) -> Result<(), AppError> {
+    let mut repo = open_here()?;
+    let bytes = fs::read(path)?;
+    let pack = mosaic_core::pack::Packfile::decode(&bytes)?;
+    let report = mosaic_core::pack::restore_into(&mut repo, &pack)?;
+    println!(
+        "restored {} change(s), {} blob(s), skipped {} already-present",
+        report.changes, report.blobs, report.skipped
+    );
+    Ok(())
+}
+
+fn pack_inspect_cmd(path: &PathBuf) -> Result<(), AppError> {
+    let bytes = fs::read(path)?;
+    let pack = mosaic_core::pack::Packfile::decode(&bytes)?;
+    println!(
+        "packfile: {} changes, {} blobs, {} index entries",
+        pack.change_count(),
+        pack.blob_count(),
+        pack.index.len()
+    );
+    Ok(())
 }
 
 fn blame_cmd(path: &str, branch: &str) -> Result<(), AppError> {
