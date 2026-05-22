@@ -198,4 +198,8 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
   audit/rollback, and an honest known-gaps section
 - ✅ `.github/workflows/ci.yml` — Rust workspace + TS + Python jobs
 
-## Current test count: **284 Rust + 6 TypeScript + 6 Python = 296 / 296 passing**
+- ✅ Secret scanning (`mosaic-core::secrets`) — pre-commit guard for AWS
+  keys, private-key blocks, GitHub/Slack tokens, high-entropy secret
+  assignments; `mos commit` blocks on findings unless `--allow-secrets`
+
+## Current test count: **293 Rust + 6 TypeScript + 6 Python = 305 / 305 passing**

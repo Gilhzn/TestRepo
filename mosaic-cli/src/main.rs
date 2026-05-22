@@ -43,6 +43,9 @@ enum Cmd {
         file: Vec<PathBuf>,
         #[arg(short, long, default_value = "main")]
         branch: String,
+        /// Commit even if the secret scanner flags likely credentials.
+        #[arg(long)]
+        allow_secrets: bool,
     },
     /// Store a binary blob via FastCDC and print its manifest hash.
     Put { path: PathBuf },
@@ -384,7 +387,8 @@ fn main() -> ExitCode {
             intent,
             file,
             branch,
-        } => run(|| commit(&intent, &file, &branch)),
+            allow_secrets,
+        } => run(|| commit(&intent, &file, &branch, allow_secrets)),
         Cmd::Put { path } => run(|| put(&path)),
         Cmd::Cat { hash, out } => run(|| cat(&hash, out.as_deref())),
         Cmd::Stats => run(stats),
@@ -679,7 +683,12 @@ fn branch_show(name: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn commit(intent: &str, files: &[PathBuf], branch: &str) -> Result<(), AppError> {
+fn commit(
+    intent: &str,
+    files: &[PathBuf],
+    branch: &str,
+    allow_secrets: bool,
+) -> Result<(), AppError> {
     use mosaic_core::working_copy::{StagedIndex, WorkingCopy};
 
     let root = std::env::current_dir()?;
@@ -718,6 +727,24 @@ fn commit(intent: &str, files: &[PathBuf], branch: &str) -> Result<(), AppError>
             ));
         }
         file_changes = wc.build_staged_file_changes(&index)?;
+    }
+
+    // Secret scan before anything is written to history.
+    let mut findings = Vec::new();
+    for fc in &file_changes {
+        findings.extend(mosaic_core::secrets::scan_file(&fc.path, &fc.patch));
+    }
+    if !findings.is_empty() {
+        eprintln!("⚠ secret scanner flagged {} potential credential(s):", findings.len());
+        for f in &findings {
+            eprintln!("    {}:{}  [{}]  {}", f.path, f.line, f.rule, f.excerpt);
+        }
+        if !allow_secrets {
+            return Err(AppError::Msg(
+                "commit blocked. Remove the secrets, or re-run with `--allow-secrets` if these are false positives.".into(),
+            ));
+        }
+        eprintln!("  (--allow-secrets given; committing anyway)");
     }
 
     for fc in file_changes {
@@ -1949,7 +1976,7 @@ fn quickstart_cmd(email: Option<&str>, name: Option<&str>) -> Result<(), AppErro
     };
     println!("  staged {added} file(s)");
     if added > 0 {
-        commit("welcome to mosaic", &[], "main")?;
+        commit("welcome to mosaic", &[], "main", false)?;
     } else {
         println!("  (nothing new to commit)");
     }
