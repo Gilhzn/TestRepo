@@ -181,24 +181,33 @@ impl LineGraph {
             let d = self.edges_in.get(v).map(|s| s.len()).unwrap_or(0);
             indeg.insert(*v, d);
         }
-        // Ready set is a BTreeSet so we pop the smallest id deterministically.
-        let mut ready: BTreeSet<VertexId> = BTreeSet::new();
+
+        // Tie-break concurrent (same-indegree-0) vertices by their longest path
+        // from the root — i.e. their intended document position — rather than by
+        // VertexId (a content hash, which orders concurrent inserts arbitrarily
+        // and scrambles e.g. two sides editing adjacent lines). `depth` is a
+        // valid relaxation along ANY topological order, so we compute it with a
+        // plain id-ordered Kahn pass first, then re-run Kahn ordering the ready
+        // set by (depth, id).
+        let depth = self.longest_path_depths(&indeg);
+
+        let mut ready: BTreeSet<(usize, VertexId)> = BTreeSet::new();
         for (v, d) in indeg.iter() {
             if *d == 0 {
-                ready.insert(*v);
+                ready.insert((depth.get(v).copied().unwrap_or(0), *v));
             }
         }
         let mut order: Vec<VertexId> = Vec::with_capacity(self.vertices.len());
         let mut indeg_mut = indeg;
-        while let Some(&v) = ready.iter().next() {
-            ready.remove(&v);
+        while let Some(&(_, v)) = ready.iter().next() {
+            ready.remove(&(depth.get(&v).copied().unwrap_or(0), v));
             order.push(v);
             if let Some(succs) = self.edges_out.get(&v) {
                 for s in succs {
                     if let Some(d) = indeg_mut.get_mut(s) {
                         *d -= 1;
                         if *d == 0 {
-                            ready.insert(*s);
+                            ready.insert((depth.get(s).copied().unwrap_or(0), *s));
                         }
                     }
                 }
@@ -210,6 +219,42 @@ impl LineGraph {
             .filter(|v| v.alive && v.id != self.root && v.id != self.sink)
             .map(|v| v.bytes.as_slice())
             .collect()
+    }
+
+    /// Longest path from the root to each vertex (the root is depth 0). Computed
+    /// by relaxing along a plain topological order; used as the position-aware
+    /// tie-break in [`flatten`](Self::flatten).
+    fn longest_path_depths(
+        &self,
+        indeg: &BTreeMap<VertexId, usize>,
+    ) -> BTreeMap<VertexId, usize> {
+        let mut indeg_mut = indeg.clone();
+        let mut ready: BTreeSet<VertexId> = indeg_mut
+            .iter()
+            .filter(|(_, d)| **d == 0)
+            .map(|(v, _)| *v)
+            .collect();
+        let mut depth: BTreeMap<VertexId, usize> = BTreeMap::new();
+        while let Some(&v) = ready.iter().next() {
+            ready.remove(&v);
+            let dv = depth.get(&v).copied().unwrap_or(0);
+            if let Some(succs) = self.edges_out.get(&v) {
+                for s in succs {
+                    let cand = dv + 1;
+                    let entry = depth.entry(*s).or_insert(0);
+                    if cand > *entry {
+                        *entry = cand;
+                    }
+                    if let Some(d) = indeg_mut.get_mut(s) {
+                        *d -= 1;
+                        if *d == 0 {
+                            ready.insert(*s);
+                        }
+                    }
+                }
+            }
+        }
+        depth
     }
 
     /// True iff Kahn covers every vertex — i.e. there are no cycles. Used for sanity.

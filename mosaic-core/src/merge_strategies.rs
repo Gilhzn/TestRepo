@@ -425,6 +425,26 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_edits_to_adjacent_lines_keep_document_order() {
+        // ours replaces line 0, theirs replaces line 1. Their new vertices are
+        // topologically concurrent; the flatten must order them by document
+        // position (line0' before line1'), not by content-hash VertexId — which
+        // used to scramble e.g. a function header below its own body.
+        let base = "AAA\nBBB\nCCC\n";
+        let ours = "XXX\nBBB\nCCC\n";
+        let theirs = "AAA\nYYY\nCCC\n";
+        let creator = Hash::of(b"adjacent");
+        let r = merge_text_file(&creator, None, base, ours, theirs).unwrap();
+        let lines: Vec<&str> = r.merged_lines.iter().map(|s| s.as_str()).collect();
+        let xi = lines.iter().position(|l| *l == "XXX");
+        let yi = lines.iter().position(|l| *l == "YYY");
+        assert!(
+            matches!((xi, yi), (Some(x), Some(y)) if x < y),
+            "expected XXX before YYY (document order), got {lines:?}"
+        );
+    }
+
+    #[test]
     fn python_three_way_merge() {
         let base = "def make_user(name):\n    return name\n";
         let ours = "def create_user(name):\n    return name\n";

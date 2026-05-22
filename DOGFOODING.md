@@ -233,3 +233,54 @@ one commit"); commit prints a 16-char hash with no indication it's a prefix; and
 there's no `mos status` step prompting before commit. Cosmetic — left as-is.
 
 Test suite after round 2: **371** (359 Rust + 6 TS + 6 Python).
+
+---
+
+## Round 3 (2026-05-22): semantic merge & rename across agents
+
+Stressed the most AI-native feature: one agent renames a function while another
+edits/extends the same file (the plan's "T5" scenario), across Python, Go, and
+JavaScript.
+
+### What works
+
+- **Rename detection is real and cross-language.** `charge_card → stripe_charge`
+  is detected on Python, Go, and JavaScript (validating the round-1 work that
+  added Go/JS/etc. to the AST layer), with call-site hints
+  ("callsite still uses old name … consider rewriting").
+- Rename-only, and rename-on-one-side + body-edit-on-the-other, merge to
+  **valid** code (Python and Go verified runnable).
+
+### Found + fixed: flatten ordered concurrent edits by content hash
+
+When two sides edited **adjacent lines** (e.g. a rename of the function header on
+one side + a body edit on the other), the merged file came out scrambled —
+JavaScript produced `return a * 2;` *above* its own `function` line; the Python
+"add a function that calls the renamed symbol" case relocated `process()`'s body
+below a later function. Python happened to merge correctly while JS didn't —
+pure luck.
+
+**Root cause:** `LineGraph::flatten` ran Kahn's topological sort tie-breaking the
+ready set by `VertexId` — a BLAKE3 content hash — so topologically-concurrent
+vertices came out in arbitrary (hash) order.
+
+**Fix:** tie-break by **longest-path depth from the root** (the vertex's intended
+document position), then id. Still a valid topological order, now position-aware.
+Re-running the cases, JS and Python both merge to valid code. Test:
+`merge_strategies::concurrent_edits_to_adjacent_lines_keep_document_order`.
+
+### Honest remaining limitation: semantic *resolution* is hint-only
+
+Mosaic *detects* the rename and *flags* call sites that still use the old name,
+but it does not **auto-rewrite** them. After merging, `refund()` still calls
+`charge_card(50)` — flagged as a hint, not fixed. The full T5 vision ("the test
+is automatically realigned to call the new name") is detection + structured
+hints today, with the actual rewrite left to the agent/human. The call-site
+hints are also imprecise (line:col sometimes points at the definition). True
+semantic-merge *resolution* (driving the text merge from the AST) remains the
+documented hard frontier — a real project, not a patch — and was deliberately
+not hacked in.
+
+Test suite after round 3: **372** (360 Rust + 6 TS + 6 Python).
+
+Test suite after round 2: **371** (359 Rust + 6 TS + 6 Python).
