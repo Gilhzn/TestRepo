@@ -174,4 +174,16 @@ Updated continuously as milestones progress. ✅ = done, 🔨 = in progress, ⬜
   (auto-generated or KMS-supplied). Plaintext never hits disk; tampering +
   wrong-key both detected.
 
-## Current test count: **256 Rust + 6 TypeScript + 6 Python = 268 / 268 passing**
+## Forge + AI-trust layer (NEW)
+- ✅ Issue tracker (`mosaic-core::issues`) — GitHub-style numbered issues +
+  signed event stream (comment/status/label/reference), server endpoints,
+  `mos issue create/list/show/comment/close/reopen/label`
+- ✅ Per-session rollback (`mosaic-core::rollback`) — `mos rollback <session>`
+  rewinds a branch past everything an agent did in a session (drops the
+  session + descendants, DAG-safe, recoverable)
+
+- ✅ Subscriptions (`mosaic-core::watch`) — `mos watch add/remove/poll/peek`;
+  poll returns only changes landed since you last looked (per-branch seen
+  frontier), the "tell me when X lands on main" without a long-lived conn
+
+## Current test count: **275 Rust + 6 TypeScript + 6 Python = 287 / 287 passing**

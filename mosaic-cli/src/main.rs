@@ -208,6 +208,33 @@ enum Cmd {
         #[arg(short, long, default_value = "main")]
         branch: String,
     },
+    /// Subscribe to a branch and poll for changes since you last looked.
+    #[command(subcommand)]
+    Watch(WatchCmd),
+}
+
+#[derive(Subcommand)]
+enum WatchCmd {
+    /// Start watching a branch from its current tip.
+    Add {
+        #[arg(default_value = "main")]
+        branch: String,
+    },
+    /// Stop watching a branch.
+    Remove {
+        #[arg(default_value = "main")]
+        branch: String,
+    },
+    /// Show new changes since last poll (advances your seen marker).
+    Poll {
+        #[arg(default_value = "main")]
+        branch: String,
+    },
+    /// Show new changes without advancing your seen marker.
+    Peek {
+        #[arg(default_value = "main")]
+        branch: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -412,7 +439,52 @@ fn main() -> ExitCode {
             run(|| quickstart_cmd(email.as_deref(), name.as_deref()))
         }
         Cmd::Rollback { session_id, branch } => run(|| rollback_cmd(&session_id, &branch)),
+        Cmd::Watch(WatchCmd::Add { branch }) => run(|| watch_add(&branch)),
+        Cmd::Watch(WatchCmd::Remove { branch }) => run(|| watch_remove(&branch)),
+        Cmd::Watch(WatchCmd::Poll { branch }) => run(|| watch_poll(&branch, true)),
+        Cmd::Watch(WatchCmd::Peek { branch }) => run(|| watch_poll(&branch, false)),
     }
+}
+
+fn watch_add(branch: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    mosaic_core::watch::watch(&repo, branch)?;
+    println!("watching {branch} from its current tip");
+    Ok(())
+}
+
+fn watch_remove(branch: &str) -> Result<(), AppError> {
+    let repo = open_here()?;
+    if mosaic_core::watch::unwatch(&repo, branch)? {
+        println!("stopped watching {branch}");
+    } else {
+        println!("(was not watching {branch})");
+    }
+    Ok(())
+}
+
+fn watch_poll(branch: &str, advance: bool) -> Result<(), AppError> {
+    let repo = open_here()?;
+    let delta = if advance {
+        mosaic_core::watch::poll(&repo, branch)?
+    } else {
+        mosaic_core::watch::peek(&repo, branch)?
+    };
+    if delta.is_empty() {
+        println!("up to date — no new changes on {branch}");
+        return Ok(());
+    }
+    println!("{} new change(s) on {branch}:", delta.len());
+    for id in &delta {
+        let change = repo.load_change(id)?;
+        println!(
+            "  {}  {}  by {}",
+            &id.to_hex()[..12],
+            change.intent.as_deref().unwrap_or("(no intent)"),
+            change.author.display()
+        );
+    }
+    Ok(())
 }
 
 fn rollback_cmd(session_id: &str, branch: &str) -> Result<(), AppError> {
