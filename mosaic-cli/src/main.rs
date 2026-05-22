@@ -211,6 +211,29 @@ enum Cmd {
     /// Subscribe to a branch and poll for changes since you last looked.
     #[command(subcommand)]
     Watch(WatchCmd),
+    /// Materialize a branch's files into the working tree (honors sparse).
+    Checkout {
+        #[arg(default_value = "main")]
+        branch: String,
+    },
+    /// Configure a sparse profile (work with a subset of a large repo).
+    #[command(subcommand)]
+    Sparse(SparseCmd),
+}
+
+#[derive(Subcommand)]
+enum SparseCmd {
+    /// Show the current sparse profile.
+    Show,
+    /// Set include/exclude globs (replaces the current profile).
+    Set {
+        #[arg(short, long)]
+        include: Vec<String>,
+        #[arg(short, long)]
+        exclude: Vec<String>,
+    },
+    /// Clear the profile (work with everything again).
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -443,7 +466,74 @@ fn main() -> ExitCode {
         Cmd::Watch(WatchCmd::Remove { branch }) => run(|| watch_remove(&branch)),
         Cmd::Watch(WatchCmd::Poll { branch }) => run(|| watch_poll(&branch, true)),
         Cmd::Watch(WatchCmd::Peek { branch }) => run(|| watch_poll(&branch, false)),
+        Cmd::Checkout { branch } => run(|| checkout_cmd(&branch)),
+        Cmd::Sparse(SparseCmd::Show) => run(sparse_show),
+        Cmd::Sparse(SparseCmd::Set { include, exclude }) => {
+            run(|| sparse_set(&include, &exclude))
+        }
+        Cmd::Sparse(SparseCmd::Clear) => run(sparse_clear),
     }
+}
+
+fn checkout_cmd(branch: &str) -> Result<(), AppError> {
+    let root = std::env::current_dir()?;
+    let repo = Repository::open(&root)?;
+    let wc = mosaic_core::working_copy::WorkingCopy::open(&repo, &root);
+    let profile = mosaic_core::sparse::SparseProfile::load(&root)?;
+    let written = wc.checkout(branch, &profile)?;
+    println!(
+        "checked out {} file(s) from {branch}{}",
+        written.len(),
+        if profile.is_active() { " (sparse)" } else { "" }
+    );
+    for p in written.iter().take(30) {
+        println!("  {p}");
+    }
+    if written.len() > 30 {
+        println!("  ... and {} more", written.len() - 30);
+    }
+    Ok(())
+}
+
+fn sparse_show() -> Result<(), AppError> {
+    let root = std::env::current_dir()?;
+    let profile = mosaic_core::sparse::SparseProfile::load(&root)?;
+    if !profile.is_active() {
+        println!("(no sparse profile — working with everything)");
+        return Ok(());
+    }
+    println!("include:");
+    for p in &profile.include {
+        println!("  {p}");
+    }
+    println!("exclude:");
+    for p in &profile.exclude {
+        println!("  {p}");
+    }
+    Ok(())
+}
+
+fn sparse_set(include: &[String], exclude: &[String]) -> Result<(), AppError> {
+    let root = std::env::current_dir()?;
+    let profile = mosaic_core::sparse::SparseProfile {
+        include: include.to_vec(),
+        exclude: exclude.to_vec(),
+    };
+    profile.save(&root)?;
+    println!(
+        "sparse profile set: {} include, {} exclude pattern(s)",
+        include.len(),
+        exclude.len()
+    );
+    println!("  run `mos checkout` to re-materialize the working tree");
+    Ok(())
+}
+
+fn sparse_clear() -> Result<(), AppError> {
+    let root = std::env::current_dir()?;
+    mosaic_core::sparse::SparseProfile::default().save(&root)?;
+    println!("sparse profile cleared");
+    Ok(())
 }
 
 fn watch_add(branch: &str) -> Result<(), AppError> {

@@ -129,6 +129,32 @@ impl<'a> WorkingCopy<'a> {
         Ok(snapshot)
     }
 
+    /// Materialize a branch's files into the working tree, honoring an
+    /// optional sparse profile. Returns the list of paths written. Files
+    /// excluded by the sparse profile are skipped (not written to disk),
+    /// which is the whole point of sparse checkout in a monorepo.
+    pub fn checkout(
+        &self,
+        branch: &str,
+        sparse: &crate::sparse::SparseProfile,
+    ) -> Result<Vec<String>> {
+        let snapshot = self.branch_snapshot(branch)?;
+        let mut written = Vec::new();
+        for (path, bytes) in &snapshot {
+            if !sparse.includes(path) {
+                continue;
+            }
+            let abs = self.root.join(path);
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent).map_err(Error::Io)?;
+            }
+            std::fs::write(&abs, bytes).map_err(Error::Io)?;
+            written.push(path.clone());
+        }
+        written.sort();
+        Ok(written)
+    }
+
     /// Walk every file under `root` (skipping `.mosaic/` and a small set of
     /// well-known artifact dirs) and return paths relative to root.
     pub fn working_tree_files(&self) -> Result<Vec<String>> {
@@ -449,6 +475,52 @@ mod tests {
         assert!(diff.contains("-beta"));
         assert!(diff.contains("+BETA"));
         assert!(diff.contains("+delta"));
+    }
+
+    #[test]
+    fn checkout_writes_branch_files() {
+        let dir = TempDir::new().unwrap();
+        seed_repo(dir.path(), &[("src/main.rs", b"fn main(){}"), ("README.md", b"hi")]);
+        // Wipe the working tree, then check out.
+        std::fs::remove_file(dir.path().join("src/main.rs")).unwrap();
+        std::fs::remove_file(dir.path().join("README.md")).unwrap();
+
+        let repo = Repository::open(dir.path()).unwrap();
+        let wc = WorkingCopy::open(&repo, dir.path());
+        let written = wc
+            .checkout("main", &crate::sparse::SparseProfile::default())
+            .unwrap();
+        assert_eq!(written.len(), 2);
+        assert_eq!(
+            std::fs::read(dir.path().join("src/main.rs")).unwrap(),
+            b"fn main(){}"
+        );
+    }
+
+    #[test]
+    fn sparse_checkout_skips_excluded_paths() {
+        let dir = TempDir::new().unwrap();
+        seed_repo(
+            dir.path(),
+            &[
+                ("payments/api.rs", b"pay"),
+                ("billing/api.rs", b"bill"),
+                ("README.md", b"hi"),
+            ],
+        );
+        for p in ["payments/api.rs", "billing/api.rs", "README.md"] {
+            std::fs::remove_file(dir.path().join(p)).unwrap();
+        }
+        let repo = Repository::open(dir.path()).unwrap();
+        let wc = WorkingCopy::open(&repo, dir.path());
+        let profile = crate::sparse::SparseProfile {
+            include: vec!["payments/**".into()],
+            exclude: vec![],
+        };
+        let written = wc.checkout("main", &profile).unwrap();
+        assert_eq!(written, vec!["payments/api.rs".to_string()]);
+        assert!(dir.path().join("payments/api.rs").exists());
+        assert!(!dir.path().join("billing/api.rs").exists());
     }
 
     #[test]

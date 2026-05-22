@@ -28,6 +28,7 @@ pub mod encryption;
 pub mod git_export;
 pub mod rollback;
 pub mod watch;
+pub mod sparse;
 
 pub use error::Error;
 pub use hash::Hash;
