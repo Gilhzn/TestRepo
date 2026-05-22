@@ -711,6 +711,65 @@ mod tests {
     }
 
     #[test]
+    fn checkout_keeps_binary_file_intact_on_divergence() {
+        // Two tips carry different binary (non-UTF-8) versions of the same path.
+        // The merge must NOT try to text-merge them (which would corrupt the
+        // bytes); it keeps one tip's bytes verbatim and flags it as binary.
+        let dir = TempDir::new().unwrap();
+        let mut repo = Repository::init(dir.path()).unwrap();
+        let (idn, key) = human();
+
+        let bin_a: Vec<u8> = vec![0u8, 159, 200, 1, 2, 255, 254];
+        let bin_b: Vec<u8> = vec![10u8, 20, 200, 159, 0, 7];
+        let base = repo
+            .commit(
+                ChangeBuilder::new(idn.clone(), key.clone())
+                    .intent("base")
+                    .file(FileChange {
+                        path: "logo.png".into(),
+                        kind: FileKind::Binary,
+                        patch: vec![1u8, 2, 3, 200],
+                        conflicts: Vec::new(),
+                    })
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap();
+        repo.advance_branch("main", base).unwrap();
+
+        let mk = |repo: &mut Repository, idn: &Identity, key: &SigningKey, bytes: Vec<u8>| {
+            repo.commit(
+                ChangeBuilder::new(idn.clone(), key.clone())
+                    .intent("edit")
+                    .dep(base)
+                    .file(FileChange {
+                        path: "logo.png".into(),
+                        kind: FileKind::Binary,
+                        patch: bytes,
+                        conflicts: Vec::new(),
+                    })
+                    .build()
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let a = mk(&mut repo, &idn, &key, bin_a.clone());
+        let b = mk(&mut repo, &idn, &key, bin_b.clone());
+        repo.advance_branch("main", a).unwrap();
+        repo.advance_branch("main", b).unwrap();
+
+        let wc = WorkingCopy::open(&repo, dir.path());
+        let (_written, notes) = wc
+            .checkout("main", &crate::sparse::SparseProfile::default())
+            .unwrap();
+        let got = std::fs::read(dir.path().join("logo.png")).unwrap();
+        // Exactly one tip's bytes, intact (not concatenated / text-merged).
+        assert!(got == bin_a || got == bin_b, "binary file was mangled: {got:?}");
+        let note = notes.iter().find(|n| n.path == "logo.png").expect("merge note");
+        assert!(note.binary, "binary divergence should be flagged binary");
+    }
+
+    #[test]
     fn sparse_checkout_skips_excluded_paths() {
         let dir = TempDir::new().unwrap();
         seed_repo(

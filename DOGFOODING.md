@@ -283,4 +283,53 @@ not hacked in.
 
 Test suite after round 3: **372** (360 Rust + 6 TS + 6 Python).
 
+---
+
+## Round 4 (2026-05-22): large / binary files — clean pass
+
+Dogfooded the fourth founding pillar (large media / model files), which earlier
+rounds hadn't touched.
+
+### What works (no bugs found)
+
+- **Integrity.** A 6 MB random binary `put` → `cat` round-trips
+  **byte-identical** (sha256 match).
+- **Content-defined dedup.** After flipping ~1 KB in the middle of the 6 MB
+  file, a re-`put` grew on-disk storage by ~1.84 MB — i.e. it re-stored only the
+  single ~2 MB FastCDC chunk the edit fell in, not the whole file. Chunking +
+  content-addressed dedup work as designed.
+- **Binary merge is safe.** Two branches with different binary versions of
+  `logo.png`, merged via `mos branch merge`, yield one tip's bytes **intact**
+  (not text-mangled) plus a `binary, kept one version (review manually)` note.
+  Test: `working_copy::checkout_keeps_binary_file_intact_on_divergence`.
+
+This is the first round that surfaced **no defect** — a good signal the storage
+pillar is solid.
+
+### Minor cosmetic note
+
+`mos put` prints the manifest hash on line 1 and a human summary on line 2, so a
+naive `mos put f | tail -1` grabs the summary, not the hash. Harmless, but the
+hash being last would be friendlier for scripting. Left as-is.
+
+Test suite after round 4: **373** (361 Rust + 6 TS + 6 Python).
+
+---
+
+## Scorecard after four rounds
+
+| Round | Focus | Bugs found & fixed |
+|-------|-------|--------------------|
+| 1 | parallel agents, merge | merge crash on identical lines; `checkout` silently dropped concurrent work; +3 ergonomics gaps |
+| 2 | fixed flow, re-run | concurrent blocks with identical body lines → broken code |
+| 3 | semantic merge / rename | `flatten` ordered concurrent edits by content hash → scrambled code |
+| 4 | large / binary files | none (integrity + dedup + binary merge all correct) |
+
+Three of the four founding pillars (clean parallel merges, semantic *detection*,
+large files) are dogfood-validated and hardened. The open frontier is semantic
+*resolution* (auto-applying renames across call sites) — known, documented, and
+deliberately left as a real project rather than a hack. The fourth pillar
+(real-time CRDT collaboration) has unit/property coverage but hasn't had a live
+multi-peer dogfood session yet.
+
 Test suite after round 2: **371** (359 Rust + 6 TS + 6 Python).
